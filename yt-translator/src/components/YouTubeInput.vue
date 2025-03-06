@@ -1,6 +1,31 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import DownloadProgress from './DownloadProgress.vue'
+
+interface VideoInfo {
+  title: string
+  duration: number
+  url: string
+  thumbnail: string
+  description: string
+}
+
+interface DownloadProgress {
+  status: string
+  progress: number
+  speed?: string
+  eta?: string
+  component: string
+}
+
+interface DownloadResult {
+  video_path: string
+  audio_path: string
+}
 
 const props = defineProps<{
   disabled?: boolean
@@ -8,22 +33,32 @@ const props = defineProps<{
 
 const youtubeUrl = ref('')
 const selectedPath = ref('')
-const emit = defineEmits(['urlSubmit'])
+const videoInfo = ref<VideoInfo | null>(null)
+const audioProgress = ref<DownloadProgress | null>(null)
+const videoProgress = ref<DownloadProgress | null>(null)
+const isLoading = ref(false)
 
-const validateAndSubmit = () => {
-  if (!selectedPath.value) {
-    alert('Please select output folder first')
-    return
-  }
+// Create a cleanup function for the event listener
+let unlisten: (() => void) | null = null;
 
-  // Basic YouTube URL validation
-  const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/
-  if (!youtubeRegex.test(youtubeUrl.value)) {
-    alert('Please enter a valid YouTube URL')
-    return
+// Setup progress listener
+onMounted(async () => {
+  unlisten = await listen<DownloadProgress>('download-progress', (event) => {
+    const progress = event.payload;
+    if (progress.component === 'audio') {
+      audioProgress.value = progress;
+    } else if (progress.component === 'video') {
+      videoProgress.value = progress;
+    }
+  });
+});
+
+// Cleanup listener on unmount
+onUnmounted(() => {
+  if (unlisten) {
+    unlisten();
   }
-  emit('urlSubmit', { url: youtubeUrl.value, outputPath: selectedPath.value })
-}
+});
 
 const selectFolder = async () => {
   try {
@@ -38,12 +73,72 @@ const selectFolder = async () => {
     console.error('Failed to select folder:', e)
   }
 }
+
+const getVideoInfo = async () => {
+  if (!youtubeUrl.value) return
+
+  try {
+    isLoading.value = true
+    videoInfo.value = await invoke('get_video_info', {
+      url: youtubeUrl.value
+    })
+  } catch (e) {
+    console.error('Failed to get video info:', e)
+    alert('Failed to get video information. Please check the URL and try again.')
+  } finally {
+    isLoading.value = false
+  }
+}
+
+const startDownload = async () => {
+  if (!selectedPath.value || !youtubeUrl.value) return
+
+  try {
+    isLoading.value = true
+    
+    // Reset progress
+    audioProgress.value = {
+      status: 'Initializing audio download...',
+      progress: 0,
+      component: 'audio'
+    }
+    videoProgress.value = {
+      status: 'Initializing video download...',
+      progress: 0,
+      component: 'video'
+    }
+
+    const result = await invoke<DownloadResult>('download_video', {
+      url: youtubeUrl.value,
+      outputPath: selectedPath.value,
+    })
+
+    console.log('Download completed:', result)
+  } catch (e) {
+    console.error('Failed to download:', e)
+    alert('Failed to download. Please try again.')
+    
+    // Update error state
+    audioProgress.value = {
+      status: 'Download failed',
+      progress: 0,
+      component: 'audio'
+    }
+    videoProgress.value = {
+      status: 'Download failed',
+      progress: 0,
+      component: 'video'
+    }
+  } finally {
+    isLoading.value = false
+  }
+}
 </script>
 
 <template>
   <div class="youtube-input">
     <h2>Enter Video URL</h2>
-    <form @submit.prevent="validateAndSubmit" class="input-form">
+    <form @submit.prevent="startDownload" class="input-form">
       <div class="input-wrapper">
         <div class="url-input-group">
           <input
@@ -51,13 +146,14 @@ const selectFolder = async () => {
             type="url"
             placeholder="https://www.youtube.com/watch?v=..."
             required
-            :disabled="disabled"
+            :disabled="disabled || isLoading"
+            @input="getVideoInfo"
           />
           <button 
             type="button" 
             class="folder-button" 
             @click="selectFolder"
-            :disabled="disabled"
+            :disabled="disabled || isLoading"
             :title="selectedPath || 'Select output folder'"
           >
             <span class="button-content">
@@ -73,14 +169,42 @@ const selectFolder = async () => {
             </span>
           </button>
         </div>
-        <button type="submit" :disabled="disabled || !selectedPath">
+        <button 
+          type="submit" 
+          :disabled="disabled || isLoading || !selectedPath || !youtubeUrl"
+        >
           <span class="button-content">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" class="icon">
               <path d="M5 12h14m-4-4l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
-            Process Video
+            {{ isLoading ? 'Processing...' : 'Process Video' }}
           </span>
         </button>
+      </div>
+
+      <!-- Video info preview -->
+      <div v-if="videoInfo" class="video-info">
+        <img 
+          :src="videoInfo.thumbnail" 
+          :alt="videoInfo.title"
+          class="video-thumbnail"
+        />
+        <div class="video-details">
+          <h3>{{ videoInfo.title }}</h3>
+          <p class="duration">Duration: {{ Math.round(videoInfo.duration / 60) }} minutes</p>
+        </div>
+      </div>
+
+      <!-- Download progress -->
+      <div v-if="audioProgress || videoProgress" class="download-progress-container">
+        <DownloadProgress
+          v-if="audioProgress"
+          v-bind="audioProgress"
+        />
+        <DownloadProgress
+          v-if="videoProgress"
+          v-bind="videoProgress"
+        />
       </div>
     </form>
   </div>
@@ -171,6 +295,44 @@ button:disabled {
   transform: none;
 }
 
+.video-info {
+  margin-top: 2rem;
+  display: flex;
+  gap: 1rem;
+  text-align: left;
+  background: var(--background-secondary);
+  padding: 1rem;
+  border-radius: 8px;
+}
+
+.video-thumbnail {
+  width: 160px;
+  height: 90px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.video-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.video-details h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  line-height: 1.4;
+}
+
+.duration {
+  margin: 0;
+  font-size: 0.9em;
+  color: var(--text-secondary);
+}
+
+.download-progress-container {
+  margin-top: 2rem;
+}
+
 @media (max-width: 640px) {
   .input-wrapper {
     flex-direction: column;
@@ -191,6 +353,16 @@ button:disabled {
 
   .folder-path {
     max-width: none;
+  }
+
+  .video-info {
+    flex-direction: column;
+  }
+
+  .video-thumbnail {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 16/9;
   }
 }
 </style> 

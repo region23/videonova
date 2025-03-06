@@ -9,6 +9,8 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use zip;
 use walkdir;
+use std::os::unix::fs::PermissionsExt;
+use tauri::path;
 
 // Structure to represent an external tool
 #[derive(Debug, Clone)]
@@ -30,35 +32,44 @@ const FFMPEG_DOWNLOAD_URLS: &[(&str, &str)] = &[
     ("linux", "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"),
 ];
 
-/// Initialize external tools
+/// Initialize external tools (ffmpeg, yt-dlp)
 pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) -> Result<()> {
-    info!("Initializing external tools...");
-    
-    // Send initial progress
-    if let Some(sender) = &progress_sender {
-        sender.send(("Checking external tools...".to_string(), 0.0)).await?;
-    }
-
-    // Check for tools in PATH first
+    // Check if tools are already in PATH
     let ffmpeg_path_result = check_command_in_path("ffmpeg");
     let ytdlp_path_result = check_command_in_path("yt-dlp");
 
-    // Clear existing tools
-    let mut tools = TOOLS.lock().unwrap();
-    tools.clear();
+    // Initialize tools vector
+    let mut initialized_tools = Vec::new();
 
     // Handle ffmpeg
-    match ffmpeg_path_result {
+    let ffmpeg_path = match ffmpeg_path_result {
         Ok(path) => {
             info!("Found ffmpeg at {}", path.display());
             if let Ok(version) = check_ffmpeg_version(&path) {
-                tools.push(ExternalTool {
+                initialized_tools.push(ExternalTool {
                     name: "ffmpeg".to_string(),
-                    path,
+                    path: path.clone(),
                     version: Some(version.clone()),
                     min_version: Version::new(4, 0, 0),
                 });
                 info!("FFmpeg version: {}", version);
+                path
+            } else {
+                // Version check failed, download
+                info!("FFmpeg version check failed, will download");
+                if let Some(sender) = &progress_sender {
+                    sender.send(("Downloading FFmpeg...".to_string(), 20.0)).await?;
+                }
+                let downloaded_path = download_ffmpeg().await?;
+                let version = check_ffmpeg_version(&downloaded_path)?;
+                initialized_tools.push(ExternalTool {
+                    name: "ffmpeg".to_string(),
+                    path: downloaded_path.clone(),
+                    version: Some(version.clone()),
+                    min_version: Version::new(4, 0, 0),
+                });
+                info!("Downloaded FFmpeg version: {}", version);
+                downloaded_path
             }
         }
         Err(_) => {
@@ -66,36 +77,48 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
             if let Some(sender) = &progress_sender {
                 sender.send(("Downloading FFmpeg...".to_string(), 20.0)).await?;
             }
-            match download_ffmpeg().await {
-                Ok(path) => {
-                    if let Ok(version) = check_ffmpeg_version(&path) {
-                        tools.push(ExternalTool {
-                            name: "ffmpeg".to_string(),
-                            path,
-                            version: Some(version),
-                            min_version: Version::new(4, 0, 0),
-                        });
-                    }
-                }
-                Err(e) => {
-                    return Err(anyhow!("Failed to download FFmpeg: {}", e));
-                }
-            }
+            let downloaded_path = download_ffmpeg().await?;
+            let version = check_ffmpeg_version(&downloaded_path)?;
+            initialized_tools.push(ExternalTool {
+                name: "ffmpeg".to_string(),
+                path: downloaded_path.clone(),
+                version: Some(version.clone()),
+                min_version: Version::new(4, 0, 0),
+            });
+            info!("Downloaded FFmpeg version: {}", version);
+            downloaded_path
         }
-    }
+    };
 
     // Handle yt-dlp
-    match ytdlp_path_result {
+    let ytdlp_path = match ytdlp_path_result {
         Ok(path) => {
             info!("Found yt-dlp at {}", path.display());
             if let Ok(version) = check_ytdlp_version(&path) {
-                tools.push(ExternalTool {
+                initialized_tools.push(ExternalTool {
                     name: "yt-dlp".to_string(),
-                    path,
+                    path: path.clone(),
                     version: Some(version.clone()),
                     min_version: Version::new(2023, 11, 16),
                 });
                 info!("yt-dlp version: {}", version);
+                path
+            } else {
+                // Version check failed, download
+                info!("yt-dlp version check failed, will download");
+                if let Some(sender) = &progress_sender {
+                    sender.send(("Downloading yt-dlp...".to_string(), 60.0)).await?;
+                }
+                let downloaded_path = download_ytdlp().await?;
+                let version = check_ytdlp_version(&downloaded_path)?;
+                initialized_tools.push(ExternalTool {
+                    name: "yt-dlp".to_string(),
+                    path: downloaded_path.clone(),
+                    version: Some(version.clone()),
+                    min_version: Version::new(2023, 11, 16),
+                });
+                info!("Downloaded yt-dlp version: {}", version);
+                downloaded_path
             }
         }
         Err(_) => {
@@ -103,22 +126,23 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
             if let Some(sender) = &progress_sender {
                 sender.send(("Downloading yt-dlp...".to_string(), 60.0)).await?;
             }
-            match download_ytdlp().await {
-                Ok(path) => {
-                    if let Ok(version) = check_ytdlp_version(&path) {
-                        tools.push(ExternalTool {
-                            name: "yt-dlp".to_string(),
-                            path,
-                            version: Some(version),
-                            min_version: Version::new(2023, 11, 16),
-                        });
-                    }
-                }
-                Err(e) => {
-                    return Err(anyhow!("Failed to download yt-dlp: {}", e));
-                }
-            }
+            let downloaded_path = download_ytdlp().await?;
+            let version = check_ytdlp_version(&downloaded_path)?;
+            initialized_tools.push(ExternalTool {
+                name: "yt-dlp".to_string(),
+                path: downloaded_path.clone(),
+                version: Some(version.clone()),
+                min_version: Version::new(2023, 11, 16),
+            });
+            info!("Downloaded yt-dlp version: {}", version);
+            downloaded_path
         }
+    };
+
+    // Update the global tools list
+    {
+        let mut tools = TOOLS.lock().unwrap();
+        *tools = initialized_tools;
     }
 
     if let Some(sender) = &progress_sender {
@@ -199,8 +223,8 @@ fn check_ytdlp_version(path: &Path) -> Result<Version> {
 
 /// Download yt-dlp
 async fn download_ytdlp() -> Result<PathBuf> {
-    let app_dir = tauri::api::path::app_dir(&tauri::Config::default())
-        .ok_or_else(|| anyhow!("Failed to get app directory"))?;
+    // Use a default path for now
+    let app_dir = std::env::temp_dir().join("yt-translator");
     
     let tools_dir = app_dir.join("tools");
     std::fs::create_dir_all(&tools_dir)?;
@@ -293,8 +317,8 @@ async fn extract_ffmpeg(archive_path: &Path, target_dir: &Path) -> Result<PathBu
 
 /// Download FFmpeg
 async fn download_ffmpeg() -> Result<PathBuf> {
-    let app_dir = tauri::api::path::app_dir(&tauri::Config::default())
-        .ok_or_else(|| anyhow!("Failed to get app directory"))?;
+    // Use a default path for now
+    let app_dir = std::env::temp_dir().join("yt-translator");
     
     let tools_dir = app_dir.join("tools");
     std::fs::create_dir_all(&tools_dir)?;
