@@ -1,16 +1,15 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use log::{debug, info};
-use semver::Version;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use tokio::sync::mpsc;
-use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use regex::Regex;
-use zip;
-use walkdir;
+use semver::Version;
 use std::os::unix::fs::PermissionsExt;
-use tauri::path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use tokio::sync::mpsc;
+use walkdir;
+use zip;
 
 // Structure to represent an external tool
 #[derive(Debug, Clone)]
@@ -27,9 +26,15 @@ static TOOLS: Lazy<Mutex<Vec<ExternalTool>>> = Lazy::new(|| Mutex::new(Vec::new(
 // Tool download URLs
 const YTDLP_DOWNLOAD_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
 const FFMPEG_DOWNLOAD_URLS: &[(&str, &str)] = &[
-    ("windows", "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"),
+    (
+        "windows",
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+    ),
     ("macos", "https://evermeet.cx/ffmpeg/getrelease/zip"),
-    ("linux", "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"),
+    (
+        "linux",
+        "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
+    ),
 ];
 
 /// Initialize external tools (ffmpeg, yt-dlp)
@@ -42,7 +47,7 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
     let mut initialized_tools = Vec::new();
 
     // Handle ffmpeg
-    let ffmpeg_path = match ffmpeg_path_result {
+    let _ffmpeg_path = match ffmpeg_path_result {
         Ok(path) => {
             info!("Found ffmpeg at {}", path.display());
             if let Ok(version) = check_ffmpeg_version(&path) {
@@ -58,7 +63,9 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
                 // Version check failed, download
                 info!("FFmpeg version check failed, will download");
                 if let Some(sender) = &progress_sender {
-                    sender.send(("Downloading FFmpeg...".to_string(), 20.0)).await?;
+                    sender
+                        .send(("Downloading FFmpeg...".to_string(), 20.0))
+                        .await?;
                 }
                 let downloaded_path = download_ffmpeg().await?;
                 let version = check_ffmpeg_version(&downloaded_path)?;
@@ -75,7 +82,9 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
         Err(_) => {
             info!("FFmpeg not found in PATH, will attempt to download");
             if let Some(sender) = &progress_sender {
-                sender.send(("Downloading FFmpeg...".to_string(), 20.0)).await?;
+                sender
+                    .send(("Downloading FFmpeg...".to_string(), 20.0))
+                    .await?;
             }
             let downloaded_path = download_ffmpeg().await?;
             let version = check_ffmpeg_version(&downloaded_path)?;
@@ -91,7 +100,7 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
     };
 
     // Handle yt-dlp
-    let ytdlp_path = match ytdlp_path_result {
+    let _ytdlp_path = match ytdlp_path_result {
         Ok(path) => {
             info!("Found yt-dlp at {}", path.display());
             if let Ok(version) = check_ytdlp_version(&path) {
@@ -99,7 +108,7 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
                     name: "yt-dlp".to_string(),
                     path: path.clone(),
                     version: Some(version.clone()),
-                    min_version: Version::new(2023, 11, 16),
+                    min_version: Version::new(23, 11, 0),
                 });
                 info!("yt-dlp version: {}", version);
                 path
@@ -107,7 +116,9 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
                 // Version check failed, download
                 info!("yt-dlp version check failed, will download");
                 if let Some(sender) = &progress_sender {
-                    sender.send(("Downloading yt-dlp...".to_string(), 60.0)).await?;
+                    sender
+                        .send(("Downloading yt-dlp...".to_string(), 60.0))
+                        .await?;
                 }
                 let downloaded_path = download_ytdlp().await?;
                 let version = check_ytdlp_version(&downloaded_path)?;
@@ -115,7 +126,7 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
                     name: "yt-dlp".to_string(),
                     path: downloaded_path.clone(),
                     version: Some(version.clone()),
-                    min_version: Version::new(2023, 11, 16),
+                    min_version: Version::new(23, 11, 0),
                 });
                 info!("Downloaded yt-dlp version: {}", version);
                 downloaded_path
@@ -124,7 +135,9 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
         Err(_) => {
             info!("yt-dlp not found in PATH, will attempt to download");
             if let Some(sender) = &progress_sender {
-                sender.send(("Downloading yt-dlp...".to_string(), 60.0)).await?;
+                sender
+                    .send(("Downloading yt-dlp...".to_string(), 60.0))
+                    .await?;
             }
             let downloaded_path = download_ytdlp().await?;
             let version = check_ytdlp_version(&downloaded_path)?;
@@ -132,7 +145,7 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
                 name: "yt-dlp".to_string(),
                 path: downloaded_path.clone(),
                 version: Some(version.clone()),
-                min_version: Version::new(2023, 11, 16),
+                min_version: Version::new(23, 11, 0),
             });
             info!("Downloaded yt-dlp version: {}", version);
             downloaded_path
@@ -146,7 +159,9 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
     }
 
     if let Some(sender) = &progress_sender {
-        sender.send(("Tools initialization completed".to_string(), 100.0)).await?;
+        sender
+            .send(("Tools initialization completed".to_string(), 100.0))
+            .await?;
     }
 
     Ok(())
@@ -155,13 +170,9 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
 /// Check if a command is available in PATH
 fn check_command_in_path(command: &str) -> Result<PathBuf> {
     let output = if cfg!(target_os = "windows") {
-        Command::new("where")
-            .arg(command)
-            .output()
+        Command::new("where").arg(command).output()
     } else {
-        Command::new("which")
-            .arg(command)
-            .output()
+        Command::new("which").arg(command).output()
     };
 
     match output {
@@ -170,7 +181,7 @@ fn check_command_in_path(command: &str) -> Result<PathBuf> {
             let path = Path::new(path_str.trim()).to_path_buf();
             Ok(path)
         }
-        _ => Err(anyhow!("Command {} not found in PATH", command))
+        _ => Err(anyhow!("Command {} not found in PATH", command)),
     }
 }
 
@@ -215,7 +226,35 @@ fn check_ytdlp_version(path: &Path) -> Result<Version> {
 
     if output.status.success() {
         let version_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(Version::parse(&version_str)?)
+        debug!("Raw yt-dlp version: {}", version_str);
+
+        // Используем регулярное выражение для извлечения чисел версии
+        let re = Regex::new(r"(\d+)\.(\d+)\.(\d+)")?;
+        if let Some(caps) = re.captures(&version_str) {
+            let major = caps.get(1).map_or("0", |m| m.as_str()).parse::<u64>()?;
+            let minor = caps.get(2).map_or("0", |m| m.as_str()).parse::<u64>()?;
+            let patch = caps.get(3).map_or("0", |m| m.as_str()).parse::<u64>()?;
+
+            debug!("Parsed yt-dlp version: {}.{}.{}", major, minor, patch);
+            return Ok(Version::new(major, minor, patch));
+        }
+
+        // Если версия в формате ГГГГММДД (например, 2023.11.16)
+        let date_re = Regex::new(r"(\d{4})\.(\d{2})\.(\d{2})")?;
+        if let Some(caps) = date_re.captures(&version_str) {
+            let year = caps.get(1).map_or("0", |m| m.as_str()).parse::<u64>()?;
+            let month = caps.get(2).map_or("0", |m| m.as_str()).parse::<u64>()?;
+            let day = caps.get(3).map_or("0", |m| m.as_str()).parse::<u64>()?;
+
+            // Преобразуем в формат SemVer
+            let major = year % 100; // Используем только последние две цифры года как major
+            debug!("Parsed yt-dlp date version: {}.{}.{}", major, month, day);
+            return Ok(Version::new(major, month, day));
+        }
+
+        // Если ничего не подошло, используем значение по умолчанию
+        debug!("Could not parse yt-dlp version, using default");
+        Ok(Version::new(23, 11, 0))
     } else {
         Err(anyhow!("Failed to get yt-dlp version"))
     }
@@ -225,7 +264,7 @@ fn check_ytdlp_version(path: &Path) -> Result<Version> {
 async fn download_ytdlp() -> Result<PathBuf> {
     // Use a default path for now
     let app_dir = std::env::temp_dir().join("yt-translator");
-    
+
     let tools_dir = app_dir.join("tools");
     std::fs::create_dir_all(&tools_dir)?;
 
@@ -238,7 +277,7 @@ async fn download_ytdlp() -> Result<PathBuf> {
     // Download the file
     let response = reqwest::get(YTDLP_DOWNLOAD_URL).await?;
     let content = response.bytes().await?;
-    
+
     // Write to file
     std::fs::write(&target_path, content)?;
 
@@ -251,7 +290,8 @@ async fn download_ytdlp() -> Result<PathBuf> {
 
 /// Extract downloaded FFmpeg archive
 async fn extract_ffmpeg(archive_path: &Path, target_dir: &Path) -> Result<PathBuf> {
-    let extension = archive_path.extension()
+    let extension = archive_path
+        .extension()
         .and_then(|ext| ext.to_str())
         .ok_or_else(|| anyhow!("Invalid archive extension"))?;
 
@@ -259,7 +299,7 @@ async fn extract_ffmpeg(archive_path: &Path, target_dir: &Path) -> Result<PathBu
         "zip" => {
             let file = std::fs::File::open(archive_path)?;
             let mut archive = zip::ZipArchive::new(file)?;
-            
+
             // Extract all files
             archive.extract(target_dir)?;
 
@@ -280,7 +320,8 @@ async fn extract_ffmpeg(archive_path: &Path, target_dir: &Path) -> Result<PathBu
                 }
             }
 
-            let ffmpeg_path = ffmpeg_path.ok_or_else(|| anyhow!("FFmpeg executable not found in archive"))?;
+            let ffmpeg_path =
+                ffmpeg_path.ok_or_else(|| anyhow!("FFmpeg executable not found in archive"))?;
 
             // Make executable on Unix-like systems
             #[cfg(not(target_os = "windows"))]
@@ -290,7 +331,7 @@ async fn extract_ffmpeg(archive_path: &Path, target_dir: &Path) -> Result<PathBu
         }
         "xz" => {
             use std::process::Command;
-            
+
             // For Linux, we use tar command line tool as it's more reliable
             let status = Command::new("tar")
                 .args(&["xf", archive_path.to_str().unwrap()])
@@ -311,7 +352,7 @@ async fn extract_ffmpeg(archive_path: &Path, target_dir: &Path) -> Result<PathBu
 
             Ok(ffmpeg_path)
         }
-        _ => Err(anyhow!("Unsupported archive format: {}", extension))
+        _ => Err(anyhow!("Unsupported archive format: {}", extension)),
     }
 }
 
@@ -319,27 +360,25 @@ async fn extract_ffmpeg(archive_path: &Path, target_dir: &Path) -> Result<PathBu
 async fn download_ffmpeg() -> Result<PathBuf> {
     // Use a default path for now
     let app_dir = std::env::temp_dir().join("yt-translator");
-    
+
     let tools_dir = app_dir.join("tools");
     std::fs::create_dir_all(&tools_dir)?;
 
     // Get download URL for current platform
     let (_, url) = FFMPEG_DOWNLOAD_URLS
         .iter()
-        .find(|(platform, _)| {
-            match *platform {
-                "windows" => cfg!(target_os = "windows"),
-                "macos" => cfg!(target_os = "macos"),
-                "linux" => cfg!(target_os = "linux"),
-                _ => false,
-            }
+        .find(|(platform, _)| match *platform {
+            "windows" => cfg!(target_os = "windows"),
+            "macos" => cfg!(target_os = "macos"),
+            "linux" => cfg!(target_os = "linux"),
+            _ => false,
         })
         .ok_or_else(|| anyhow!("Unsupported platform"))?;
 
     // Download the archive
     let response = reqwest::get(*url).await?;
     let content = response.bytes().await?;
-    
+
     // Create a temporary file for the archive
     let temp_dir = tempfile::tempdir()?;
     let archive_path = temp_dir.path().join("ffmpeg_archive");
@@ -356,9 +395,10 @@ async fn download_ffmpeg() -> Result<PathBuf> {
 
 /// Get tool path by name
 pub fn get_tool_path(name: &str) -> Option<PathBuf> {
-    TOOLS.lock()
+    TOOLS
+        .lock()
         .unwrap()
         .iter()
         .find(|tool| tool.name == name)
         .map(|tool| tool.path.clone())
-} 
+}

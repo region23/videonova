@@ -1,10 +1,10 @@
+use reqwest;
+use serde::Serialize;
 use std::path::PathBuf;
-use tauri::State;
 use tauri::Emitter;
 use tokio::sync::mpsc;
-use serde::Serialize;
 
-use crate::utils::youtube::{self, VideoInfo, DownloadProgress};
+use crate::utils::youtube::{self, DownloadProgress, VideoInfo};
 
 #[derive(Clone, Serialize)]
 pub struct DownloadState {
@@ -36,7 +36,7 @@ pub async fn download_video(
 ) -> Result<DownloadResult, String> {
     // Create progress channel
     let (tx, mut rx) = mpsc::channel(32);
-    
+
     // Clone window handle for the progress monitoring task
     let progress_window = window.clone();
 
@@ -60,4 +60,17 @@ pub async fn download_video(
         video_path: result.video_path.to_string_lossy().to_string(),
         audio_path: result.audio_path.to_string_lossy().to_string(),
     })
-} 
+}
+
+#[tauri::command]
+pub async fn validate_openai_key(api_key: String) -> Result<bool, String> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get("https://api.openai.com/v1/models")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(response.status().is_success())
+}

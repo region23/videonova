@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Secret files and storage
+.settings.dat
+*.secret
+.env*
+!.env.example

@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
+import { listen } from '@tauri-apps/api/event'
 import YouTubeInput from './YouTubeInput.vue'
 import LanguageSelector from './LanguageSelector.vue'
-import ProcessingProgress from './ProcessingProgress.vue'
+import VideoPreview from './VideoPreview.vue'
+import ApiKeyInput from './ApiKeyInput.vue'
 
 interface Language {
   code: string
@@ -14,156 +16,152 @@ interface LanguagePair {
   target: Language
 }
 
-interface ProcessingInput {
+interface VideoInfo {
+  title: string
+  duration: number
   url: string
-  outputPath: string
+  thumbnail: string
+  description: string
+}
+
+interface DownloadResult {
+  video_path: string
+  audio_path: string
 }
 
 const isProcessing = ref(false)
-const currentStep = ref('')
-const progress = ref(0)
 const error = ref('')
-
 const selectedLanguages = ref<LanguagePair | null>(null)
+const videoInfo = ref<VideoInfo | null>(null)
+const showApiKeyUpdate = ref(false)
 
-const handleUrlSubmit = async (input: ProcessingInput) => {
+// Listen for the show-settings event
+let unlisten: (() => void) | undefined
+
+onMounted(async () => {
+  unlisten = await listen('show-settings', () => {
+    showApiKeyUpdate.value = true
+  })
+})
+
+onUnmounted(() => {
+  unlisten?.()
+})
+
+const handleVideoInfo = (info: VideoInfo) => {
+  videoInfo.value = info
+}
+
+const handleDownloadStart = () => {
   if (!selectedLanguages.value) {
     error.value = 'Please select source and target languages first'
     return
   }
-
   isProcessing.value = true
   error.value = ''
-  
-  try {
-    // TODO: Implement the actual processing logic here
-    // This is just a mock implementation for now
-    console.log('Processing video:', {
-      url: input.url,
-      outputPath: input.outputPath,
-      languages: selectedLanguages.value
-    })
+}
 
-    currentStep.value = 'Downloading video'
-    progress.value = 0
-    
-    // Simulate processing steps
-    const steps = [
-      'Downloading video',
-      'Extracting audio',
-      'Transcribing audio',
-      'Translating text',
-      'Generating speech',
-      'Creating final video'
-    ]
+const handleDownloadComplete = (result: DownloadResult) => {
+  console.log('Download completed:', result)
+  isProcessing.value = false
+}
 
-    for (const step of steps) {
-      currentStep.value = step
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      progress.value += Math.floor(100 / steps.length)
-    }
-
-    progress.value = 100
-    setTimeout(() => {
-      isProcessing.value = false
-      progress.value = 0
-      currentStep.value = ''
-    }, 1000)
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : 'An unknown error occurred'
-    isProcessing.value = false
-  }
+const handleDownloadError = (errorMessage: string) => {
+  error.value = errorMessage
+  isProcessing.value = false
 }
 
 const handleLanguagesSelected = (languages: LanguagePair) => {
   selectedLanguages.value = languages
 }
+
+const handleCancelUpdate = () => {
+  showApiKeyUpdate.value = false
+}
+
+const handleApiKeyUpdated = () => {
+  showApiKeyUpdate.value = false
+}
 </script>
 
 <template>
   <div class="main-layout">
-    <header class="backdrop-blur">
-      <div class="header-content">
-        <h1>YouTube Video Translator</h1>
-        <p class="description">
-          Translate your favorite YouTube videos into any language with AI-powered
-          voice translation
-        </p>
-      </div>
-    </header>
+    <div v-if="!showApiKeyUpdate">
+      <main>
+        <div class="content-wrapper">
+          <div class="content-card main-content">
+            <LanguageSelector @languages-selected="handleLanguagesSelected" />
+            <div class="divider"></div>
+            <YouTubeInput 
+              :disabled="isProcessing"
+              @video-info="handleVideoInfo"
+              @download-start="handleDownloadStart"
+              @download-complete="handleDownloadComplete"
+              @download-error="handleDownloadError"
+            />
+          </div>
+          
+          <div class="content-card info-content">
+            <VideoPreview 
+              :video-info="videoInfo"
+            />
+          </div>
+        </div>
+      </main>
+    </div>
 
-    <main>
-      <div class="content-card backdrop-blur">
-        <LanguageSelector @languages-selected="handleLanguagesSelected" />
-        <div class="divider"></div>
-        <YouTubeInput @url-submit="handleUrlSubmit" :disabled="isProcessing" />
-      </div>
-      
-      <div v-if="isProcessing || error" class="content-card backdrop-blur">
-        <ProcessingProgress
-          :current-step="currentStep"
-          :progress="progress"
-          :error="error"
-        />
-      </div>
-    </main>
+    <ApiKeyInput
+      v-if="showApiKeyUpdate"
+      mode="update"
+      @apiKeySet="handleApiKeyUpdated"
+      @cancel="handleCancelUpdate"
+    />
   </div>
 </template>
 
 <style scoped>
 .main-layout {
-  max-width: 1000px;
+  width: 1150px;
   margin: 0 auto;
   padding: 0 2rem;
-}
-
-header {
-  position: sticky;
-  top: 0;
-  z-index: 100;
-  padding: 1rem 0;
-  margin: 0 -2rem;
-  background-color: var(--background-secondary);
-}
-
-.header-content {
-  max-width: 1000px;
-  margin: 0 auto;
-  padding: 0 2rem;
-  text-align: center;
-}
-
-h1 {
-  font-size: 2.5rem;
-  font-weight: 700;
-  margin-bottom: 0.5rem;
-  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  letter-spacing: -0.02em;
-}
-
-.description {
-  font-size: 1.1rem;
-  color: var(--text-secondary);
-  max-width: 600px;
-  margin: 0 auto;
-  font-weight: 400;
+  display: flex;
+  flex-direction: column;
 }
 
 main {
   padding: 2rem 0;
+  flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: calc(100vh - 100px);
+}
+
+.content-wrapper {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 2rem;
+  align-items: stretch;
+  height: 100%;
 }
 
 .content-card {
-  background-color: var(--background-secondary);
-  border-radius: 20px;
+  background-color: white;
+  border-radius: 12px;
   padding: 2rem;
-  box-shadow: 0 4px 24px var(--shadow-color);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.main-content {
+  display: flex;
+  flex-direction: column;
+}
+
+.info-content {
+  display: flex;
+  flex-direction: column;
 }
 
 .divider {
@@ -172,29 +170,23 @@ main {
   margin: 2rem 0;
 }
 
+@media (max-width: 1200px) {
+  .main-layout {
+    width: 100%;
+  }
+}
+
 @media (max-width: 768px) {
+  .content-wrapper {
+    grid-template-columns: 1fr;
+  }
+
   .main-layout {
     padding: 0 1rem;
   }
 
-  header {
-    margin: 0 -1rem;
-  }
-
-  .header-content {
-    padding: 0 1rem;
-  }
-
-  h1 {
-    font-size: 2rem;
-  }
-
   .description {
     font-size: 1rem;
-  }
-
-  .content-card {
-    padding: 1.5rem;
   }
 }
 </style> 

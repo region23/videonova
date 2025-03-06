@@ -1,9 +1,34 @@
 <script setup lang="ts">
+import { ref, onMounted } from 'vue'
 import MainLayout from './components/MainLayout.vue'
+import ApiKeyInput from './components/ApiKeyInput.vue'
+import { load } from '@tauri-apps/plugin-store'
+
+const hasApiKey = ref(false)
+const loading = ref(true)
+
+onMounted(async () => {
+  try {
+    const store = await load('.settings.dat')
+    const apiKey = await store.get('openai-api-key')
+    hasApiKey.value = !!apiKey
+  } catch (error) {
+    console.error('Error checking API key:', error)
+  } finally {
+    loading.value = false
+  }
+})
+
+const handleApiKeySet = () => {
+  hasApiKey.value = true
+}
 </script>
 
 <template>
-  <MainLayout />
+  <div v-if="!loading">
+    <ApiKeyInput v-if="!hasApiKey" @apiKeySet="handleApiKeySet" />
+    <MainLayout v-else />
+  </div>
 </template>
 
 <style>

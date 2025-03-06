@@ -8,12 +8,12 @@ interface Language {
 
 const languages: Language[] = [
   { code: 'en', name: 'English' },
+  { code: 'ru', name: 'Russian' },
   { code: 'es', name: 'Spanish' },
   { code: 'fr', name: 'French' },
   { code: 'de', name: 'German' },
   { code: 'it', name: 'Italian' },
   { code: 'pt', name: 'Portuguese' },
-  { code: 'ru', name: 'Russian' },
   { code: 'ja', name: 'Japanese' },
   { code: 'ko', name: 'Korean' },
   { code: 'zh', name: 'Chinese' },
@@ -95,7 +95,7 @@ h2 {
   display: flex;
   gap: 1rem;
   justify-content: center;
-  align-items: center;
+  align-items: flex-end;
   flex-wrap: wrap;
 }
 
@@ -110,7 +110,7 @@ h2 {
   color: var(--text-secondary);
   display: flex;
   align-items: center;
-  padding: 1.5rem 0.5rem;
+  margin-bottom: 4px;
 }
 
 label {
@@ -118,6 +118,7 @@ label {
   font-weight: 500;
   color: var(--text-secondary);
   text-align: left;
+  padding-left: 0.80rem;
 }
 
 select {
@@ -126,7 +127,7 @@ select {
   background-repeat: no-repeat;
   background-position: right 0.7rem center;
   background-size: 1em;
-  padding-right: 2.5rem;
+  padding: 0.5rem 2.5rem 0.5rem 0.75rem;
   cursor: pointer;
 }
 

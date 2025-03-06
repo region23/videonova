@@ -25,16 +25,17 @@
             "core:menu:default",
             "core:tray:default",
             "dialog:default",
-            "opener:default"
+            "opener:default",
+            "store:default"
           ]
         }
       ]
     },
     "windows": [
       {
-        "title": "yt-translator",
-        "width": 800,
-        "height": 600
+        "title": "Youtube AI Video Translator",
+        "width": 1200,
+        "height": 500
       }
     ]
   },
