@@ -263,7 +263,7 @@ fn check_ytdlp_version(path: &Path) -> Result<Version> {
 /// Download yt-dlp
 async fn download_ytdlp() -> Result<PathBuf> {
     // Use a default path for now
-    let app_dir = std::env::temp_dir().join("yt-translator");
+    let app_dir = std::env::temp_dir().join("videonova");
 
     let tools_dir = app_dir.join("tools");
     std::fs::create_dir_all(&tools_dir)?;
@@ -359,7 +359,7 @@ async fn extract_ffmpeg(archive_path: &Path, target_dir: &Path) -> Result<PathBu
 /// Download FFmpeg
 async fn download_ffmpeg() -> Result<PathBuf> {
     // Use a default path for now
-    let app_dir = std::env::temp_dir().join("yt-translator");
+    let app_dir = std::env::temp_dir().join("videonova");
 
     let tools_dir = app_dir.join("tools");
     std::fs::create_dir_all(&tools_dir)?;

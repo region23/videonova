@@ -3,8 +3,8 @@
 
 use env_logger;
 use log::error;
-use tauri::{Manager, Emitter};
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
+use tauri::{Emitter, Manager};
 use tauri_plugin_store::StoreExt;
 
 mod commands;
@@ -14,24 +14,29 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // Create app submenu
             let app_menu = SubmenuBuilder::new(app, "App")
-                .text("about", "About YT Translator")
+                .text("about", "About Videonova")
                 .separator()
                 .text("settings", "Settings")
                 .separator()
-                .text("quit", "Quit")
+                .quit()
                 .build()?;
 
-            // Create main menu
-            let menu = MenuBuilder::new(app)
-                .items(&[&app_menu])
+            let edit_menu = SubmenuBuilder::new(app, "Edit")
+                .cut()
+                .copy()
+                .paste()
+                .select_all()
                 .build()?;
-           
+            // Create main menu
+            let menu = MenuBuilder::new(app).items(&[&app_menu, &edit_menu]).build()?;
+
             app.set_menu(menu)?;
 
             // Initialize store

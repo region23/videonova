@@ -1,8 +1,8 @@
 [package]
-name = "yt-translator"
+name = "videonova"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Translate your favorite YouTube videos into any language with AI-powered voice translation"
+authors = ["@region23"]
 edition = "2024"
 
 [build-dependencies]
@@ -29,6 +29,7 @@ tempfile = "3.17"
 zip = "2.2"
 walkdir = "2.5"
 tauri-plugin-devtools = "2.0.0"
+tauri-plugin-clipboard-manager = "2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"] 
