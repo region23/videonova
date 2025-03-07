@@ -25,9 +25,20 @@ interface TranscriptionResult {
   vtt_path: string
 }
 
+interface TranslationResult {
+  translated_vtt_path: string
+  base_filename: string
+}
+
+interface TTSResult {
+  audio_path: string
+}
+
 const props = defineProps<{
   disabled?: boolean
   sourceLanguage?: string
+  targetLanguage?: string
+  targetLanguageCode?: string
 }>()
 
 const emit = defineEmits<{
@@ -37,6 +48,8 @@ const emit = defineEmits<{
   'download-error': [error: string]
   'transcription-complete': [result: TranscriptionResult]
   'transcription-error': [error: string]
+  'translation-complete': [result: TranslationResult]
+  'translation-error': [error: string]
   'language-detected': [code: string]
   'start-download': [url: string, path: string]
 }>()
@@ -45,9 +58,14 @@ const youtubeUrl = ref('')
 const selectedPath = ref('')
 const isLoading = ref(false)
 const isTranscribing = ref(false)
+const isTranslating = ref(false)
+const isGeneratingTTS = ref(false)
 const showTranscription = ref(false)
 const downloadResult = ref<DownloadResult | null>(null)
 const audioPath = ref<string | null>(null)
+const vttPath = ref<string | null>(null)
+const translatedVttPath = ref<string | null>(null)
+const ttsAudioPath = ref<string | null>(null)
 
 // Listen for audio-ready event and automatically start transcription
 listen('audio-ready', (event) => {
@@ -152,11 +170,17 @@ const startTranscriptionWithPath = async (path: string) => {
         })
         
         emit('transcription-complete', result)
+        vttPath.value = result.vtt_path
         
-        // Скрываем индикатор через 3 секунды
-        setTimeout(() => {
-          isTranscribing.value = false
-        }, 3000)
+        // Auto-start translation if target language is set
+        if (props.targetLanguage && props.targetLanguageCode) {
+          startTranslation(result.vtt_path);
+        } else {
+          // Скрываем индикатор через 3 секунды
+          setTimeout(() => {
+            isTranscribing.value = false
+          }, 3000)
+        }
       } catch (e) {
         console.error('Failed to transcribe:', e)
         emit('transcription-error', e instanceof Error ? e.message : 'Failed to transcribe. Please try again.')
@@ -175,6 +199,133 @@ const startTranscriptionWithPath = async (path: string) => {
     setTimeout(() => {
       isTranscribing.value = false
     }, 5000)
+  }
+}
+
+// Add a new function to handle translation
+const startTranslation = async (vttPath: string) => {
+  if (!vttPath || !props.targetLanguage || !props.targetLanguageCode) return
+  
+  try {
+    isTranslating.value = true
+    
+    // Get OpenAI API key from store
+    const store = await TauriStore.load('.settings.dat')
+    const apiKey = await store.get('openai-api-key') as string
+    
+    if (!apiKey) {
+      throw new Error('OpenAI API key not found. Please add it in the settings.')
+    }
+    
+    // Use setTimeout for non-blocking execution
+    setTimeout(async () => {
+      try {
+        const result = await invoke<TranslationResult>('translate_vtt', {
+          vttPath: vttPath,
+          outputPath: selectedPath.value,
+          sourceLanguage: props.sourceLanguage || '',
+          targetLanguage: props.targetLanguage,
+          targetLanguageCode: props.targetLanguageCode,
+          apiKey: apiKey
+        })
+        
+        emit('translation-complete', result)
+        translatedVttPath.value = result.translated_vtt_path
+        
+        // Automatically start TTS generation after translation completes
+        // Use the base_filename from the translation result
+        generateTTS(result.translated_vtt_path, result.base_filename);
+        
+        // Hide indicator after 3 seconds
+        setTimeout(() => {
+          isTranslating.value = false
+          isTranscribing.value = false
+        }, 3000)
+      } catch (e) {
+        console.error('Failed to translate:', e)
+        emit('translation-error', e instanceof Error ? e.message : 'Failed to translate. Please try again.')
+        
+        // Hide indicator after 5 seconds in case of error
+        setTimeout(() => {
+          isTranslating.value = false
+          isTranscribing.value = false
+        }, 5000)
+      }
+    }, 100) // Small delay
+  } catch (e) {
+    console.error('Failed to initialize translation:', e)
+    emit('translation-error', e instanceof Error ? e.message : 'Failed to initialize translation. Please try again.')
+    
+    // Hide indicator after 5 seconds in case of error
+    setTimeout(() => {
+      isTranslating.value = false
+      isTranscribing.value = false
+    }, 5000)
+  }
+}
+
+// Update function to generate TTS from subtitle file with base filename
+const generateTTS = async (subtitlePath: string | null, baseFilename: string) => {
+  if (!subtitlePath) return
+
+  try {
+    isGeneratingTTS.value = true
+    
+    // Get OpenAI API key from store
+    const store = await TauriStore.load('.settings.dat')
+    const apiKey = await store.get('openai-api-key') as string
+    
+    if (!apiKey) {
+      throw new Error('OpenAI API key not found. Please add it in the settings.')
+    }
+    
+    // Use setTimeout for non-blocking execution
+    setTimeout(async () => {
+      try {
+        const result = await invoke<TTSResult>('generate_speech', {
+          vttPath: subtitlePath,
+          outputPath: selectedPath.value,
+          apiKey: apiKey,
+          voice: 'nova', // Default voice, could be made configurable
+          model: 'tts-1', // Default model, could be made configurable
+          wordsPerSecond: 2.5, // Default words per second, could be made configurable
+          baseFilename: baseFilename
+        })
+        
+        ttsAudioPath.value = result.audio_path
+        
+        // Hide indicator after 3 seconds
+        setTimeout(() => {
+          isGeneratingTTS.value = false
+        }, 3000)
+      } catch (e) {
+        console.error('Failed to generate TTS:', e)
+        
+        // Hide indicator after 5 seconds in case of error
+        setTimeout(() => {
+          isGeneratingTTS.value = false
+        }, 5000)
+      }
+    }, 100) // Small delay
+  } catch (e) {
+    console.error('Failed to initialize TTS generation:', e)
+    
+    // Hide indicator after 5 seconds in case of error
+    setTimeout(() => {
+      isGeneratingTTS.value = false
+    }, 5000)
+  }
+}
+
+// Function to open a file
+const openFile = async (path: string | null) => {
+  if (path) {
+    try {
+      // Use the invoke pattern instead of direct plugin import
+      await invoke('plugin:opener:open', { path })
+    } catch (e) {
+      console.error('Failed to open file:', e)
+    }
   }
 }
 
@@ -322,5 +473,72 @@ button:disabled {
   .youtube-input {
     width: 100%;
   }
+}
+
+.tts-controls {
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: var(--background-secondary, #f5f5f5);
+  border-radius: 8px;
+}
+
+.tts-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--primary, #3b82f6);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.tts-button:hover {
+  background-color: var(--primary-dark, #2563eb);
+}
+
+.tts-button:disabled {
+  background-color: var(--disabled, #9ca3af);
+  cursor: not-allowed;
+}
+
+.tts-result {
+  margin-top: 1rem;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.play-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--success, #10b981);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  margin-top: 0.5rem;
+  transition: background-color 0.2s ease;
+}
+
+.play-button:hover {
+  background-color: var(--success-dark, #059669);
+}
+
+.button-content {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.icon {
+  flex-shrink: 0;
 }
 </style> 

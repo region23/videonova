@@ -140,6 +140,9 @@ const handleProcessClick = async () => {
               @download-complete="handleDownloadComplete"
               @download-error="handleDownloadError"
               @start-download="handleStartDownload"
+              :source-language="sourceLanguage"
+              :target-language="selectedLanguages?.target?.name || ''"
+              :target-language-code="selectedLanguages?.target?.code || ''"
             />
 
             <div class="divider"></div>

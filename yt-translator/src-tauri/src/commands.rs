@@ -8,6 +8,8 @@ use anyhow::anyhow;
 
 use crate::utils::youtube::{self, DownloadProgress, VideoInfo};
 use crate::utils::transcribe;
+use crate::utils::translate;
+use crate::utils::tts;
 use crate::utils::common::sanitize_filename;
 
 #[derive(Clone, Serialize)]
@@ -26,6 +28,17 @@ pub struct DownloadResult {
 #[derive(Serialize)]
 pub struct TranscriptionResult {
     vtt_path: String,
+}
+
+#[derive(Serialize)]
+pub struct TranslationResult {
+    translated_vtt_path: String,
+    base_filename: String,
+}
+
+#[derive(Serialize)]
+pub struct TTSResult {
+    audio_path: String,
 }
 
 /// Get information about a YouTube video
@@ -173,4 +186,113 @@ pub async fn validate_openai_key(api_key: String) -> Result<bool, String> {
         .map_err(|e| e.to_string())?;
 
     Ok(response.status().is_success())
+}
+
+/// Translate VTT file to target language using OpenAI GPT-4o-mini
+#[tauri::command]
+pub async fn translate_vtt(
+    vtt_path: String,
+    output_path: String,
+    source_language: String,
+    target_language: String,
+    target_language_code: String,
+    api_key: String,
+    window: tauri::Window,
+) -> Result<TranslationResult, String> {
+    // Create progress channel
+    let (tx, mut rx) = mpsc::channel::<translate::TranslationProgress>(32);
+
+    // Clone window handle for the progress monitoring task
+    let progress_window = window.clone();
+
+    // Spawn progress monitoring task
+    let monitoring_task = tokio::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            // Emit progress event to frontend
+            if let Err(e) = progress_window.emit("translation-progress", progress) {
+                eprintln!("Failed to emit translation progress: {}", e);
+            }
+        }
+    });
+
+    // Start translation
+    let vtt_file = PathBuf::from(vtt_path);
+    let output_dir = PathBuf::from(output_path);
+    
+    let result_path = translate::translate_vtt(
+        &vtt_file,
+        &output_dir,
+        &target_language_code,
+        &target_language,
+        &api_key,
+        Some(tx),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Wait for monitoring task to complete
+    let _ = monitoring_task.await;
+
+    // Extract the base filename for use in generate_speech
+    let filename = vtt_file.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+
+    Ok(TranslationResult {
+        translated_vtt_path: result_path.to_string_lossy().to_string(),
+        base_filename: filename.to_string(),
+    })
+}
+
+/// Generate speech audio from VTT subtitle file using OpenAI TTS API
+#[tauri::command]
+pub async fn generate_speech(
+    vtt_path: String,
+    output_path: String,
+    api_key: String,
+    voice: String,
+    model: String,
+    words_per_second: f64,
+    base_filename: String,
+    window: tauri::Window,
+) -> Result<TTSResult, String> {
+    // Create progress channel
+    let (tx, mut rx) = mpsc::channel::<tts::TTSProgress>(32);
+
+    // Clone window handle for the progress monitoring task
+    let progress_window = window.clone();
+
+    // Spawn progress monitoring task
+    let monitoring_task = tokio::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            // Emit progress event to frontend
+            if let Err(e) = progress_window.emit("tts-progress", progress) {
+                eprintln!("Failed to emit TTS progress: {}", e);
+            }
+        }
+    });
+
+    // Start TTS generation
+    let vtt_file = PathBuf::from(vtt_path);
+    let output_dir = PathBuf::from(output_path);
+    
+    let result_path = tts::generate_tts(
+        &vtt_file,
+        &output_dir,
+        &api_key,
+        &voice,
+        &model,
+        words_per_second,
+        &base_filename,
+        Some(tx),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Wait for monitoring task to complete
+    let _ = monitoring_task.await;
+
+    Ok(TTSResult {
+        audio_path: result_path.to_string_lossy().to_string(),
+    })
 }

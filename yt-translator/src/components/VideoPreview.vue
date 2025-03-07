@@ -3,6 +3,8 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { listen } from '@tauri-apps/api/event'
 import DownloadProgress from './DownloadProgress.vue'
 import TranscriptionProgress from './TranscriptionProgress.vue'
+import TranslationProgress from './TranslationProgress.vue'
+import TTSProgress from './TTSProgress.vue'
 
 interface VideoInfo {
   title: string
@@ -26,6 +28,20 @@ interface TranscriptionProgress {
   progress: number
 }
 
+// Добавляем интерфейс для прогресса перевода
+interface TranslationProgress {
+  status: string
+  progress: number
+}
+
+// Добавляем интерфейс для прогресса озвучки
+interface TTSProgress {
+  status: string
+  progress: number
+  current_segment?: number
+  total_segments?: number
+}
+
 const props = defineProps<{
   videoInfo?: VideoInfo | null
 }>()
@@ -34,11 +50,19 @@ const audioProgress = ref<DownloadProgress | null>(null)
 const videoProgress = ref<DownloadProgress | null>(null)
 // Добавляем переменную для прогресса транскрибации
 const transcriptionProgress = ref<TranscriptionProgress | null>(null)
+// Добавляем переменную для прогресса перевода
+const translationProgress = ref<TranslationProgress | null>(null)
+// Добавляем переменную для прогресса озвучки
+const ttsProgress = ref<TTSProgress | null>(null)
 const isTranscribing = ref(false)
+const isTranslating = ref(false)
+const isTTSGenerating = ref(false)
 
 // Create a cleanup function for the event listener
 let unlisten: (() => void) | null = null;
 let unlistenTranscription: (() => void) | null = null;
+let unlistenTranslation: (() => void) | null = null;
+let unlistenTTS: (() => void) | null = null;
 
 // Setup progress listener
 onMounted(async () => {
@@ -56,6 +80,18 @@ onMounted(async () => {
     transcriptionProgress.value = event.payload;
     isTranscribing.value = true;
   });
+  
+  // Слушаем событие прогресса перевода
+  unlistenTranslation = await listen<TranslationProgress>('translation-progress', (event) => {
+    translationProgress.value = event.payload;
+    isTranslating.value = true;
+  });
+  
+  // Слушаем событие прогресса озвучки
+  unlistenTTS = await listen<TTSProgress>('tts-progress', (event) => {
+    ttsProgress.value = event.payload;
+    isTTSGenerating.value = true;
+  });
 });
 
 // Cleanup listener on unmount
@@ -65,6 +101,12 @@ onUnmounted(() => {
   }
   if (unlistenTranscription) {
     unlistenTranscription();
+  }
+  if (unlistenTranslation) {
+    unlistenTranslation();
+  }
+  if (unlistenTTS) {
+    unlistenTTS();
   }
 });
 </script>
@@ -98,9 +140,27 @@ onUnmounted(() => {
         :progress="transcriptionProgress.progress"
       />
     </div>
+    
+    <!-- Translation progress -->
+    <div v-if="isTranslating && translationProgress" class="translation-progress-container">
+      <TranslationProgress 
+        :status="translationProgress.status"
+        :progress="translationProgress.progress"
+      />
+    </div>
+    
+    <!-- TTS progress -->
+    <div v-if="isTTSGenerating && ttsProgress" class="tts-progress-container">
+      <TTSProgress 
+        :status="ttsProgress.status"
+        :progress="ttsProgress.progress"
+        :current_segment="ttsProgress.current_segment"
+        :total_segments="ttsProgress.total_segments"
+      />
+    </div>
 
     <!-- Empty state -->
-    <div v-if="!videoInfo && !audioProgress && !videoProgress && !isTranscribing" class="empty-state">
+    <div v-if="!videoInfo && !audioProgress && !videoProgress && !isTranscribing && !isTranslating && !isTTSGenerating" class="empty-state">
         <p class="description">
           Translate your favorite YouTube videos into any language with AI-powered
           voice translation
@@ -161,7 +221,9 @@ onUnmounted(() => {
 }
 
 .download-progress-container,
-.transcription-progress-container {
+.transcription-progress-container,
+.translation-progress-container,
+.tts-progress-container {
   margin-top: 0.5rem;
   background-color: var(--background-secondary, #f5f5f5);
   border-radius: 12px;
