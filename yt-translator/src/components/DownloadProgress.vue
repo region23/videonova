@@ -38,9 +38,10 @@ const componentLabel = computed(() =>
   props.component.charAt(0).toUpperCase() + props.component.slice(1)
 )
 
-const componentColor = computed(() => 
-  props.component === 'audio' ? 'var(--accent-secondary, #00b4d8)' : 'var(--accent-primary, #0077ff)'
-)
+const componentColor = computed(() => {
+  if (props.progress === 100) return '#4CAF50'
+  return props.component === 'audio' ? 'var(--accent-secondary, #00b4d8)' : 'var(--accent-primary, #0077ff)'
+})
 
 const showDetails = computed(() => props.speed || props.eta)
 </script>
