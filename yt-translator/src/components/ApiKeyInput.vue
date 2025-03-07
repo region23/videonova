@@ -9,8 +9,8 @@ interface Props {
   onCancel?: () => void
 }
 
-const props = withDefaults(defineProps<Props>(), {
-  mode: 'setup'
+withDefaults(defineProps<Props>(), {
+  mode: 'update'
 })
 
 const emit = defineEmits(['apiKeySet'])

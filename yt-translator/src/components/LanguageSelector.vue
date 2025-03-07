@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { languages, type Language, findLanguageByCode } from '../utils/languages'
+import { languages, findLanguageByCode } from '../utils/languages'
 
 const props = defineProps<{
   initialSourceLanguage?: string

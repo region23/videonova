@@ -38,18 +38,31 @@ const showApiKeyUpdate = ref(false)
 const sourceLanguage = ref('')
 const currentUrl = ref('')
 const selectedPath = ref('')
+const isMainContentLocked = ref(false)
 
 // Listen for the show-settings event
 let unlisten: (() => void) | undefined
+
+// Add new refs for progress states with правильной типизацией
+const transcriptionProgress = ref<any>(null)
+const translationProgress = ref<any>(null)
+const ttsProgress = ref<any>(null)
+const mergeProgress = ref<any>(null)
 
 onMounted(async () => {
   unlisten = await listen('show-settings', () => {
     showApiKeyUpdate.value = true
   })
-})
 
-onUnmounted(() => {
-  unlisten?.()
+  // Add listener for merge-complete event
+  const unlistenMergeComplete = await listen('merge-complete', () => {
+    handleMergeComplete()
+  })
+
+  onUnmounted(() => {
+    unlisten?.()
+    unlistenMergeComplete?.()
+  })
 })
 
 const handleVideoInfo = (info: VideoInfo) => {
@@ -71,6 +84,47 @@ const handleDownloadStart = () => {
 
 const handleDownloadComplete = (result: DownloadResult) => {
   isProcessing.value = false
+  
+  // Отправляем событие download-complete в YouTubeInput
+  console.log("Download completed in MainLayout, emitting result:", result)
+}
+
+const handleTranscriptionProgress = (progress: any) => {
+  console.log("Transcription progress in MainLayout:", progress)
+  transcriptionProgress.value = progress
+}
+
+const handleTranscriptionComplete = (result: any) => {
+  console.log("Transcription complete in MainLayout:", result)
+  // Устанавливаем progress в 100%, чтобы гарантировать правильное состояние
+  transcriptionProgress.value = { status: 'Complete', progress: 100 }
+}
+
+const handleTranslationProgress = (progress: any) => {
+  console.log("Translation progress in MainLayout:", progress)
+  translationProgress.value = progress
+}
+
+const handleTranslationComplete = (result: any) => {
+  console.log("Translation complete in MainLayout:", result)
+  // Устанавливаем progress в 100%, чтобы гарантировать правильное состояние
+  translationProgress.value = { status: 'Complete', progress: 100 }
+}
+
+const handleTTSProgress = (progress: any) => {
+  console.log("TTS progress in MainLayout:", progress)
+  ttsProgress.value = progress
+}
+
+const handleTTSComplete = (result: any) => {
+  console.log("TTS complete in MainLayout:", result)
+  // Устанавливаем progress в 100%, чтобы гарантировать правильное состояние
+  ttsProgress.value = { status: 'Complete', progress: 100 }
+}
+
+const handleMergeProgress = (progress: any) => {
+  console.log("Merge progress in MainLayout:", progress)
+  mergeProgress.value = progress
 }
 
 const handleDownloadError = (errorMessage: string) => {
@@ -111,6 +165,7 @@ const handleProcessClick = async () => {
 
   try {
     isProcessing.value = true
+    isMainContentLocked.value = true
     error.value = ''
     
     const result = await invoke<DownloadResult>('download_video', {
@@ -124,6 +179,11 @@ const handleProcessClick = async () => {
     handleDownloadError(e instanceof Error ? e.message : 'Failed to download. Please try again.')
   }
 }
+
+const handleMergeComplete = () => {
+  isMainContentLocked.value = false
+  isProcessing.value = false
+}
 </script>
 
 <template>
@@ -131,7 +191,7 @@ const handleProcessClick = async () => {
     <div v-if="!showApiKeyUpdate">
       <main>
         <div class="content-wrapper">
-          <div class="content-card main-content">
+          <div class="content-card main-content" :class="{ 'content-locked': isMainContentLocked }">
             <YouTubeInput 
               :disabled="isProcessing"
               @video-info="handleVideoInfo"
@@ -140,9 +200,17 @@ const handleProcessClick = async () => {
               @download-complete="handleDownloadComplete"
               @download-error="handleDownloadError"
               @start-download="handleStartDownload"
+              @transcription-progress="handleTranscriptionProgress"
+              @transcription-complete="handleTranscriptionComplete"
+              @translation-progress="handleTranslationProgress"
+              @translation-complete="handleTranslationComplete"
+              @tts-progress="handleTTSProgress"
+              @tts-complete="handleTTSComplete"
+              @merge-progress="handleMergeProgress"
               :source-language="sourceLanguage"
               :target-language="selectedLanguages?.target?.name || ''"
               :target-language-code="selectedLanguages?.target?.code || ''"
+              class="youtube-input-section"
             />
 
             <div class="divider"></div>
@@ -151,6 +219,7 @@ const handleProcessClick = async () => {
               :initial-source-language="sourceLanguage"
               v-model:source-language="sourceLanguage"
               @languages-selected="handleLanguagesSelected"
+              class="language-selector-section"
             />
 
             <div v-if="error" class="error-message">
@@ -174,6 +243,11 @@ const handleProcessClick = async () => {
           <div class="content-card info-content">
             <VideoPreview 
               :video-info="videoInfo"
+              @merge-complete="handleMergeComplete"
+              :transcription-progress="transcriptionProgress"
+              :translation-progress="translationProgress"
+              :tts-progress="ttsProgress"
+              :merge-progress="mergeProgress"
             />
           </div>
         </div>
@@ -193,41 +267,57 @@ const handleProcessClick = async () => {
 .main-layout {
   width: 1150px;
   margin: 0 auto;
-  padding: 0 2rem;
+  padding: 0 1rem;
   display: flex;
   flex-direction: column;
+  min-height: 100vh;
 }
 
 main {
-  padding: 2rem 0;
+  padding: 1rem 0;
   flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: calc(100vh - 100px);
 }
 
 .content-wrapper {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 2rem;
-  align-items: stretch;
-  height: 100%;
+  gap: 1rem;
+  margin-top: 0.5rem;
 }
 
 .content-card {
-  background-color: white;
+  background: white;
   border-radius: 12px;
-  padding: 2rem;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-  height: 100%;
-  display: flex;
-  flex-direction: column;
+  padding: 0.75rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .main-content {
+  position: relative;
+  transition: opacity 0.3s ease, filter 0.3s ease;
   display: flex;
   flex-direction: column;
-  gap: 2rem;
+  gap: 0.75rem;
+}
+
+.content-locked {
+  opacity: 0.7;
+  pointer-events: none;
+  filter: grayscale(0.5);
+}
+
+.content-locked::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 12px;
+  cursor: not-allowed;
 }
 
 .info-content {
@@ -238,29 +328,31 @@ main {
 .divider {
   height: 1px;
   background-color: var(--border-color);
-
+  margin: 0.5rem 0;
 }
 
 .error-message {
   color: var(--error-color);
-  font-size: 0.9rem;
-  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  margin-top: 0.125rem;
 }
 
 .process-button {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 40px;
-  padding: 0 16px;
+  height: 36px;
+  padding: 0 12px;
+  font-size: 0.9rem;
   font-weight: 500;
   transition: all 0.2s ease;
-  border-radius: 8px;
+  border-radius: 6px;
   background-color: var(--accent-primary);
   color: white;
   border: none;
   cursor: pointer;
   width: 100%;
+  margin-top: 0.5rem;
 }
 
 .process-button:disabled {
@@ -271,7 +363,20 @@ main {
 .button-content {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+}
+
+.button-content svg {
+  width: 14px;
+  height: 14px;
+}
+
+.youtube-input-section {
+  margin-bottom: 0.25rem;
+}
+
+.language-selector-section {
+  margin: 0.5rem 0;
 }
 
 @media (max-width: 1200px) {

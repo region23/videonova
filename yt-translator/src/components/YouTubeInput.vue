@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
@@ -34,6 +34,11 @@ interface TTSResult {
   audio_path: string
 }
 
+interface MergeResult {
+  output_path: string
+  output_dir: string
+}
+
 const props = defineProps<{
   disabled?: boolean
   sourceLanguage?: string
@@ -52,25 +57,60 @@ const emit = defineEmits<{
   'translation-error': [error: string]
   'language-detected': [code: string]
   'start-download': [url: string, path: string]
+  'merge-complete': [result: MergeResult]
+  'merge-error': [error: string]
+  'transcription-progress': [progress: any]
+  'translation-progress': [progress: any]
+  'tts-progress': [progress: any]
+  'merge-progress': [progress: any]
+  'tts-complete': [result: TTSResult]
 }>()
 
 const youtubeUrl = ref('')
 const selectedPath = ref('')
 const isLoading = ref(false)
 const isTranscribing = ref(false)
-const isTranslating = ref(false)
-const isGeneratingTTS = ref(false)
+const isMerging = ref(false)
 const showTranscription = ref(false)
 const downloadResult = ref<DownloadResult | null>(null)
 const audioPath = ref<string | null>(null)
 const vttPath = ref<string | null>(null)
 const translatedVttPath = ref<string | null>(null)
 const ttsAudioPath = ref<string | null>(null)
+const videoPath = ref<string | null>(null)
+
+// Добавляем слушатель события download-complete
+onMounted(async () => {
+  // Слушаем события завершения загрузки видео
+  const unlistenDownloadComplete = await listen<DownloadResult>('download-complete', (event) => {
+    downloadResult.value = event.payload
+    console.log('Download complete, result:', downloadResult.value)
+    
+    // Сохраняем путь к видеофайлу
+    videoPath.value = event.payload.video_path
+  })
+  
+  // Очистка слушателя при размонтировании компонента
+  onUnmounted(() => {
+    unlistenDownloadComplete()
+  })
+})
 
 // Listen for audio-ready event and automatically start transcription
 listen('audio-ready', (event) => {
   const path = event.payload as string
   audioPath.value = path
+  
+  // Вытаскиваем путь к видеофайлу из пути к аудиофайлу, если он отсутствует
+  if (!videoPath.value && downloadResult.value) {
+    // Путь к видеофайлу должен быть похож на путь к аудиофайлу,
+    // только с другим суффиксом
+    const audioPathStr = path as string
+    if (audioPathStr.endsWith('_audio.m4a')) {
+      const basePathWithoutSuffix = audioPathStr.slice(0, -10) // убираем '_audio.m4a'
+      videoPath.value = `${basePathWithoutSuffix}.mp4` // предполагаем, что видео в формате mp4
+    }
+  }
   
   // Показываем раздел транскрибации
   isTranscribing.value = true
@@ -162,6 +202,11 @@ const startTranscriptionWithPath = async (path: string) => {
     // Используем setTimeout для обеспечения неблокирующего вызова
     setTimeout(async () => {
       try {
+        // Listen for transcription progress
+        const unlistenTranscriptionProgress = await listen('transcription-progress', (event) => {
+          emit('transcription-progress', event.payload)
+        })
+
         const result = await invoke<TranscriptionResult>('transcribe_audio', {
           audioPath: path,
           outputPath: selectedPath.value,
@@ -169,163 +214,190 @@ const startTranscriptionWithPath = async (path: string) => {
           language: props.sourceLanguage || ''
         })
         
+        unlistenTranscriptionProgress()
         emit('transcription-complete', result)
         vttPath.value = result.vtt_path
         
         // Auto-start translation if target language is set
         if (props.targetLanguage && props.targetLanguageCode) {
-          startTranslation(result.vtt_path);
-        } else {
-          // Скрываем индикатор через 3 секунды
-          setTimeout(() => {
-            isTranscribing.value = false
-          }, 3000)
+          startTranslation(result.vtt_path)
         }
       } catch (e) {
         console.error('Failed to transcribe:', e)
         emit('transcription-error', e instanceof Error ? e.message : 'Failed to transcribe. Please try again.')
-        
-        // Скрываем индикатор через 5 секунд в случае ошибки
-        setTimeout(() => {
-          isTranscribing.value = false
-        }, 5000)
       }
-    }, 100) // Небольшая задержка для завершения обработки аудио
+    }, 100)
   } catch (e) {
     console.error('Failed to initialize transcription:', e)
     emit('transcription-error', e instanceof Error ? e.message : 'Failed to initialize transcription. Please try again.')
-    
-    // Скрываем индикатор через 5 секунд в случае ошибки
-    setTimeout(() => {
-      isTranscribing.value = false
-    }, 5000)
   }
 }
 
-// Add a new function to handle translation
+// Add translation progress listener
 const startTranslation = async (vttPath: string) => {
-  if (!vttPath || !props.targetLanguage || !props.targetLanguageCode) return
+  try {
+    const store = await TauriStore.load('.settings.dat')
+    const apiKey = await store.get('openai-api-key') as string
+
+    if (!apiKey) {
+      throw new Error('OpenAI API key not found')
+    }
+
+    // Listen for translation progress
+    const unlistenTranslationProgress = await listen('translation-progress', (event) => {
+      emit('translation-progress', event.payload)
+    })
+
+    const result = await invoke<TranslationResult>('translate_vtt', {
+      vttPath,
+      outputPath: selectedPath.value,
+      sourceLanguage: props.sourceLanguage || '',
+      targetLanguage: props.targetLanguage || '',
+      targetLanguageCode: props.targetLanguageCode || '',
+      apiKey
+    })
+    
+    unlistenTranslationProgress()
+    emit('translation-complete', result)
+    translatedVttPath.value = result.translated_vtt_path
+
+    // Auto-start TTS
+    startTTS(result.translated_vtt_path)
+  } catch (e) {
+    console.error('Failed to translate:', e)
+    emit('translation-error', e instanceof Error ? e.message : 'Failed to translate. Please try again.')
+  }
+}
+
+// Add TTS progress listener
+const startTTS = async (translatedVttPath: string) => {
+  console.log('Starting TTS generation for path:', translatedVttPath)
+  try {
+    const store = await TauriStore.load('.settings.dat')
+    const apiKey = await store.get('openai-api-key') as string
+
+    if (!apiKey) {
+      throw new Error('OpenAI API key not found')
+    }
+
+    // Listen for TTS progress
+    const unlistenTTSProgress = await listen('tts-progress', (event) => {
+      console.log('TTS progress received:', event.payload)
+      emit('tts-progress', event.payload)
+    })
+
+    console.log('Invoking generate_speech with parameters:', {
+      vttPath: translatedVttPath,
+      outputPath: selectedPath.value,
+      voice: 'alloy',
+      model: 'tts-1',
+      wordsPerSecond: 3.0,
+      baseFilename: translatedVttPath.split('/').pop()?.split('.')[0] || 'output'
+    })
+
+    const result = await invoke<TTSResult>('generate_speech', {
+      vttPath: translatedVttPath,
+      outputPath: selectedPath.value,
+      apiKey,
+      voice: 'alloy',
+      model: 'tts-1',
+      wordsPerSecond: 3.0,
+      baseFilename: translatedVttPath.split('/').pop()?.split('.')[0] || 'output'
+    })
+    
+    console.log('TTS generation complete, result:', result)
+    unlistenTTSProgress()
+    ttsAudioPath.value = result.audio_path
+
+    // Генерируем событие о завершении генерации TTS
+    emit('tts-complete', result)
+
+    // Auto-start merge
+    startMerge()
+  } catch (e) {
+    console.error('Failed to generate TTS:', e)
+    emit('translation-error', e instanceof Error ? e.message : 'Failed to generate TTS. Please try again.')
+  }
+}
+
+// Add merge progress listener
+const startMerge = async () => {
+  console.log('Starting merge process, checking for required files...')
+  // Проверяем наличие всех необходимых файлов и собираем отладочную информацию
+  const debugInfo = {
+    ttsAudio: !!ttsAudioPath.value,
+    vtt: !!vttPath.value,
+    translatedVtt: !!translatedVttPath.value,
+    downloadResult: !!downloadResult.value,
+    videoPath: !!videoPath.value,
+    ttsAudioPath: ttsAudioPath.value,
+    vttPath: vttPath.value,
+    translatedVttPath: translatedVttPath.value,
+    videoPathValue: videoPath.value
+  }
+  
+  console.log('Merge prerequisites debug info:', debugInfo)
+  
+  if (!ttsAudioPath.value || !vttPath.value || !translatedVttPath.value) {
+    console.error('Missing required files for merge:', debugInfo)
+    emit('merge-error', 'Missing required files for merge. Please check logs for details.')
+    return
+  }
+  
+  // Если downloadResult недоступен, используем videoPath напрямую
+  // Если у нас есть пути к файлам из разных источников, выбираем первый доступный
+  const videoFilePath = 
+    (downloadResult.value?.video_path) || 
+    videoPath.value || 
+    (audioPath.value?.replace('_audio.m4a', '.mp4'))
+  
+  if (!videoFilePath) {
+    console.error('Video path is not available. Debug info:', debugInfo)
+    emit('merge-error', 'Video path is not available. Cannot proceed with merge.')
+    return
+  }
   
   try {
-    isTranslating.value = true
+    isMerging.value = true
     
-    // Get OpenAI API key from store
-    const store = await TauriStore.load('.settings.dat')
-    const apiKey = await store.get('openai-api-key') as string
+    // Сохраняем путь к видео для последующего использования
+    videoPath.value = videoFilePath
     
-    if (!apiKey) {
-      throw new Error('OpenAI API key not found. Please add it in the settings.')
-    }
+    // Listen for merge progress
+    const unlistenMergeProgress = await listen('merge-progress', (event) => {
+      console.log('Merge progress received:', event.payload)
+      emit('merge-progress', event.payload)
+    })
     
-    // Use setTimeout for non-blocking execution
     setTimeout(async () => {
       try {
-        const result = await invoke<TranslationResult>('translate_vtt', {
-          vttPath: vttPath,
-          outputPath: selectedPath.value,
-          sourceLanguage: props.sourceLanguage || '',
-          targetLanguage: props.targetLanguage,
-          targetLanguageCode: props.targetLanguageCode,
-          apiKey: apiKey
+        console.log('Starting media merge with paths:', {
+          videoPath: videoFilePath,
+          audioPath: ttsAudioPath.value,
+          vttPath: vttPath.value,
+          translatedVttPath: translatedVttPath.value
         })
         
-        emit('translation-complete', result)
-        translatedVttPath.value = result.translated_vtt_path
-        
-        // Automatically start TTS generation after translation completes
-        // Use the base_filename from the translation result
-        generateTTS(result.translated_vtt_path, result.base_filename);
-        
-        // Hide indicator after 3 seconds
-        setTimeout(() => {
-          isTranslating.value = false
-          isTranscribing.value = false
-        }, 3000)
-      } catch (e) {
-        console.error('Failed to translate:', e)
-        emit('translation-error', e instanceof Error ? e.message : 'Failed to translate. Please try again.')
-        
-        // Hide indicator after 5 seconds in case of error
-        setTimeout(() => {
-          isTranslating.value = false
-          isTranscribing.value = false
-        }, 5000)
-      }
-    }, 100) // Small delay
-  } catch (e) {
-    console.error('Failed to initialize translation:', e)
-    emit('translation-error', e instanceof Error ? e.message : 'Failed to initialize translation. Please try again.')
-    
-    // Hide indicator after 5 seconds in case of error
-    setTimeout(() => {
-      isTranslating.value = false
-      isTranscribing.value = false
-    }, 5000)
-  }
-}
-
-// Update function to generate TTS from subtitle file with base filename
-const generateTTS = async (subtitlePath: string | null, baseFilename: string) => {
-  if (!subtitlePath) return
-
-  try {
-    isGeneratingTTS.value = true
-    
-    // Get OpenAI API key from store
-    const store = await TauriStore.load('.settings.dat')
-    const apiKey = await store.get('openai-api-key') as string
-    
-    if (!apiKey) {
-      throw new Error('OpenAI API key not found. Please add it in the settings.')
-    }
-    
-    // Use setTimeout for non-blocking execution
-    setTimeout(async () => {
-      try {
-        const result = await invoke<TTSResult>('generate_speech', {
-          vttPath: subtitlePath,
+        const result = await invoke<MergeResult>('merge_media', {
+          videoPath: videoFilePath,
+          translatedAudioPath: ttsAudioPath.value,
+          originalVttPath: vttPath.value,
+          translatedVttPath: translatedVttPath.value,
           outputPath: selectedPath.value,
-          apiKey: apiKey,
-          voice: 'nova', // Default voice, could be made configurable
-          model: 'tts-1', // Default model, could be made configurable
-          wordsPerSecond: 2.5, // Default words per second, could be made configurable
-          baseFilename: baseFilename
         })
         
-        ttsAudioPath.value = result.audio_path
+        unlistenMergeProgress()
+        console.log('Merge complete, result:', result)
         
-        // Hide indicator after 3 seconds
-        setTimeout(() => {
-          isGeneratingTTS.value = false
-        }, 3000)
+        emit('merge-complete', result)
       } catch (e) {
-        console.error('Failed to generate TTS:', e)
-        
-        // Hide indicator after 5 seconds in case of error
-        setTimeout(() => {
-          isGeneratingTTS.value = false
-        }, 5000)
+        console.error('Failed to merge media:', e)
+        emit('merge-error', e instanceof Error ? e.message : 'Failed to merge media. Please try again.')
       }
-    }, 100) // Small delay
+    }, 100)
   } catch (e) {
-    console.error('Failed to initialize TTS generation:', e)
-    
-    // Hide indicator after 5 seconds in case of error
-    setTimeout(() => {
-      isGeneratingTTS.value = false
-    }, 5000)
-  }
-}
-
-// Function to open a file
-const openFile = async (path: string | null) => {
-  if (path) {
-    try {
-      // Use the invoke pattern instead of direct plugin import
-      await invoke('plugin:opener:open', { path })
-    } catch (e) {
-      console.error('Failed to open file:', e)
-    }
+    console.error('Failed to initialize merge process:', e)
+    emit('merge-error', e instanceof Error ? e.message : 'Failed to initialize merge process. Please try again.')
   }
 }
 

@@ -10,6 +10,7 @@ use crate::utils::youtube::{self, DownloadProgress, VideoInfo};
 use crate::utils::transcribe;
 use crate::utils::translate;
 use crate::utils::tts;
+use crate::utils::merge;
 use crate::utils::common::sanitize_filename;
 
 #[derive(Clone, Serialize)]
@@ -19,7 +20,7 @@ pub struct DownloadState {
     progress_sender: mpsc::Sender<DownloadProgress>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct DownloadResult {
     video_path: String,
     audio_path: String,
@@ -39,6 +40,12 @@ pub struct TranslationResult {
 #[derive(Serialize)]
 pub struct TTSResult {
     audio_path: String,
+}
+
+#[derive(Serialize)]
+pub struct MergeResult {
+    output_path: String,
+    output_dir: String,
 }
 
 /// Get information about a YouTube video
@@ -117,10 +124,18 @@ pub async fn download_video(
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(DownloadResult {
+    // Создаем результат для возврата
+    let download_result = DownloadResult {
         video_path: result.video_path.to_string_lossy().to_string(),
         audio_path: result.audio_path.to_string_lossy().to_string(),
-    })
+    };
+    
+    // Отправляем событие download-complete с результатом
+    if let Err(e) = window.emit("download-complete", download_result.clone()) {
+        eprintln!("Failed to emit download-complete event: {}", e);
+    }
+
+    Ok(download_result)
 }
 
 /// Transcribe audio file to VTT format using OpenAI Whisper API
@@ -295,4 +310,65 @@ pub async fn generate_speech(
     Ok(TTSResult {
         audio_path: result_path.to_string_lossy().to_string(),
     })
+}
+
+/// Final step: merge video with translated audio and subtitles using ffmpeg
+#[tauri::command]
+pub async fn merge_media(
+    video_path: String,
+    translated_audio_path: String,
+    original_vtt_path: String,
+    translated_vtt_path: String,
+    output_path: String,
+    window: tauri::Window,
+) -> Result<MergeResult, String> {
+    // Create progress channel
+    let (tx, mut rx) = mpsc::channel::<merge::MergeProgress>(32);
+
+    // Clone window handle for the progress monitoring task
+    let progress_window = window.clone();
+
+    // Spawn progress monitoring task
+    let monitoring_task = tokio::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            // Emit progress event to frontend
+            if let Err(e) = progress_window.emit("merge-progress", progress) {
+                eprintln!("Failed to emit merge progress: {}", e);
+            }
+        }
+    });
+
+    // Start merge process
+    let video_file = PathBuf::from(&video_path);
+    let translated_audio_file = PathBuf::from(&translated_audio_path);
+    let original_vtt_file = PathBuf::from(&original_vtt_path);
+    let translated_vtt_file = PathBuf::from(&translated_vtt_path);
+    let output_dir = PathBuf::from(&output_path);
+    
+    let result_path = merge::merge_files(
+        &video_file,
+        &translated_audio_file,
+        &original_vtt_file,
+        &translated_vtt_file,
+        &output_dir,
+        Some(tx),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Wait for monitoring task to complete
+    let _ = monitoring_task.await;
+
+    // Создаем результат
+    let result = MergeResult {
+        output_path: result_path.to_string_lossy().to_string(),
+        output_dir: output_dir.to_string_lossy().to_string(),
+    };
+
+    // Явно эмитим событие merge-complete
+    if let Err(e) = window.emit("merge-complete", &result) {
+        eprintln!("Failed to emit merge-complete event: {}", e);
+    }
+
+    Ok(result)
 }
