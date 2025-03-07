@@ -1,0 +1,5 @@
+[term]
+quiet = true
+
+[env]
+RUST_LOG = { value = "warn,yt_translator=info", force = true }

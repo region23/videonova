@@ -1,32 +1,27 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
+import { languages, type Language, findLanguageByCode } from '../utils/languages'
 
-interface Language {
-  code: string
-  name: string
-}
+const props = defineProps<{
+  initialSourceLanguage?: string
+}>()
 
-const languages: Language[] = [
-  { code: 'en', name: 'English' },
-  { code: 'ru', name: 'Russian' },
-  { code: 'es', name: 'Spanish' },
-  { code: 'fr', name: 'French' },
-  { code: 'de', name: 'German' },
-  { code: 'it', name: 'Italian' },
-  { code: 'pt', name: 'Portuguese' },
-  { code: 'ja', name: 'Japanese' },
-  { code: 'ko', name: 'Korean' },
-  { code: 'zh', name: 'Chinese' },
-]
-
-const sourceLanguage = ref(languages[0])
+const sourceLanguage = ref(props.initialSourceLanguage ? findLanguageByCode(props.initialSourceLanguage) : languages[0])
 const targetLanguage = ref(languages[1])
 
-const emit = defineEmits(['languagesSelected'])
+const emit = defineEmits(['languagesSelected', 'update:sourceLanguage'])
 
 watch([sourceLanguage, targetLanguage], ([source, target]) => {
   emit('languagesSelected', { source, target })
+  emit('update:sourceLanguage', source.code)
 }, { immediate: true })
+
+// Следим за изменением пропса
+watch(() => props.initialSourceLanguage, (newCode) => {
+  if (newCode) {
+    sourceLanguage.value = findLanguageByCode(newCode)
+  }
+})
 </script>
 
 <template>
@@ -87,7 +82,7 @@ h2 {
   font-size: 1.25rem;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 1.5rem;
+  margin-bottom: 1rem;
   letter-spacing: -0.01em;
 }
 

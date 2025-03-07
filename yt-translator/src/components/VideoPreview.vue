@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { listen } from '@tauri-apps/api/event'
 import DownloadProgress from './DownloadProgress.vue'
+import TranscriptionProgress from './TranscriptionProgress.vue'
 
 interface VideoInfo {
   title: string
@@ -19,15 +20,25 @@ interface DownloadProgress {
   component: string
 }
 
+// Добавляем интерфейс для прогресса транскрибации
+interface TranscriptionProgress {
+  status: string
+  progress: number
+}
+
 const props = defineProps<{
   videoInfo?: VideoInfo | null
 }>()
 
 const audioProgress = ref<DownloadProgress | null>(null)
 const videoProgress = ref<DownloadProgress | null>(null)
+// Добавляем переменную для прогресса транскрибации
+const transcriptionProgress = ref<TranscriptionProgress | null>(null)
+const isTranscribing = ref(false)
 
 // Create a cleanup function for the event listener
 let unlisten: (() => void) | null = null;
+let unlistenTranscription: (() => void) | null = null;
 
 // Setup progress listener
 onMounted(async () => {
@@ -39,12 +50,21 @@ onMounted(async () => {
       videoProgress.value = progress;
     }
   });
+
+  // Слушаем событие прогресса транскрибации
+  unlistenTranscription = await listen<TranscriptionProgress>('transcription-progress', (event) => {
+    transcriptionProgress.value = event.payload;
+    isTranscribing.value = true;
+  });
 });
 
 // Cleanup listener on unmount
 onUnmounted(() => {
   if (unlisten) {
     unlisten();
+  }
+  if (unlistenTranscription) {
+    unlistenTranscription();
   }
 });
 </script>
@@ -62,12 +82,25 @@ onUnmounted(() => {
 
     <!-- Download progress -->
     <div v-if="audioProgress || videoProgress" class="download-progress-container">
+      <h3 class="progress-title">Download Progress</h3>
       <DownloadProgress v-if="audioProgress" v-bind="audioProgress" />
       <DownloadProgress v-if="videoProgress" v-bind="videoProgress" />
     </div>
 
+    <!-- Transcription progress -->
+    <div v-if="isTranscribing && transcriptionProgress" class="transcription-progress-container">
+      <!-- <h3 class="progress-title">Transcription Progress</h3>
+      <p class="transcription-info">
+        Transcribing audio to generate VTT subtitles using OpenAI's Whisper API...
+      </p> -->
+      <TranscriptionProgress 
+        :status="transcriptionProgress.status"
+        :progress="transcriptionProgress.progress"
+      />
+    </div>
+
     <!-- Empty state -->
-    <div v-if="!videoInfo && !audioProgress && !videoProgress" class="empty-state">
+    <div v-if="!videoInfo && !audioProgress && !videoProgress && !isTranscribing" class="empty-state">
         <p class="description">
           Translate your favorite YouTube videos into any language with AI-powered
           voice translation
@@ -127,8 +160,27 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 
-.download-progress-container {
-  margin-top: 2rem;
+.download-progress-container,
+.transcription-progress-container {
+  margin-top: 0.5rem;
+  background-color: var(--background-secondary, #f5f5f5);
+  border-radius: 12px;
+  padding: 0.5rem;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+}
+
+.progress-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 1rem;
+  letter-spacing: -0.01em;
+}
+
+.transcription-info {
+  margin-bottom: 1rem;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
 }
 
 .empty-state {

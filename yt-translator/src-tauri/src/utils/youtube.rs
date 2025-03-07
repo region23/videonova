@@ -5,11 +5,12 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
-use tokio::task::{self, JoinHandle};
+use tokio::task;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use super::tools::get_tool_path;
+use crate::utils::common::sanitize_filename;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VideoInfo {
@@ -18,6 +19,8 @@ pub struct VideoInfo {
     pub url: String,
     pub thumbnail: String,
     pub description: String,
+    pub language: Option<String>,      // Язык видео
+    pub original_language: Option<String>, // Оригинальный язык видео
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -74,11 +77,18 @@ pub async fn download_video(
     let child_processes = Arc::new(Mutex::new(Vec::new()));
     let child_processes_clone = child_processes.clone();
 
-    // Prepare output templates
+    // Prepare output templates with yt-dlp's --restrict-filenames for consistency
+    // We'll use constant extensions for predictability (m4a for audio, mp4 for video)
+    let audio_filename = format!("{}_audio.m4a", safe_title);
+    let video_filename = format!("{}_video.mp4", safe_title);
+    
     let audio_template = output_dir.join(format!("{}_audio.%(ext)s", safe_title));
     let video_template = output_dir.join(format!("{}_video.%(ext)s", safe_title));
+    
     debug!("Audio template: {}", audio_template.display());
     debug!("Video template: {}", video_template.display());
+    debug!("Expected audio filename: {}", audio_filename);
+    debug!("Expected video filename: {}", video_filename);
 
     // Create progress channels for audio and video
     let (audio_progress_tx, mut audio_progress_rx) = mpsc::channel(32);
@@ -209,6 +219,15 @@ async fn download_audio(
     info!("Starting audio download for URL: {}", url);
     debug!("Using output template: {}", output_template.display());
 
+    // Extract the expected filename pattern from the output template
+    let filename_pattern = output_template
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.replace("%(ext)s", "m4a"))
+        .unwrap_or_else(|| "_audio.m4a".to_string());
+    
+    debug!("Expected filename pattern: {}", filename_pattern);
+
     let mut command = Command::new(ytdlp_path);
     command
         .arg(url)
@@ -223,6 +242,8 @@ async fn download_audio(
         .arg("--progress")
         .arg("--no-playlist")
         .arg("--no-warnings")
+        .arg("--no-mtime") // Don't use the media file timestamp
+        .arg("--restrict-filenames") // Restrict filenames to only ASCII characters
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -232,6 +253,7 @@ async fn download_audio(
         progress_sender,
         cancellation_token,
         child_processes,
+        &filename_pattern,
     )
     .await
 }
@@ -247,6 +269,15 @@ async fn download_video_only(
 ) -> Result<PathBuf> {
     info!("Starting video-only download for URL: {}", url);
     debug!("Using output template: {}", output_template.display());
+    
+    // Extract the expected filename pattern from the output template
+    let filename_pattern = output_template
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.replace("%(ext)s", "mp4"))
+        .unwrap_or_else(|| "_video.mp4".to_string());
+    
+    debug!("Expected filename pattern: {}", filename_pattern);
 
     let mut command = Command::new(ytdlp_path);
     command
@@ -259,6 +290,8 @@ async fn download_video_only(
         .arg("--progress")
         .arg("--no-playlist")
         .arg("--no-warnings")
+        .arg("--no-mtime") // Don't use the media file timestamp
+        .arg("--restrict-filenames") // Restrict filenames to only ASCII characters
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -268,6 +301,7 @@ async fn download_video_only(
         progress_sender,
         cancellation_token,
         child_processes,
+        &filename_pattern,
     )
     .await
 }
@@ -278,8 +312,10 @@ async fn process_download(
     progress_sender: Option<mpsc::Sender<DownloadProgress>>,
     cancellation_token: CancellationToken,
     child_processes: Arc<Mutex<Vec<std::process::Child>>>,
+    expected_filename_pattern: &str,
 ) -> Result<PathBuf> {
     debug!("Starting download process with command: {:?}", command);
+    debug!("Expected filename pattern: {}", expected_filename_pattern);
 
     let mut child = command.spawn()?;
 
@@ -368,15 +404,46 @@ async fn process_download(
 
     info!("Download process completed successfully");
 
-    // Find the output file (most recent file in directory)
+    // Find the output file by pattern instead of just taking the newest file
     let parent = PathBuf::from(
         command
             .get_current_dir()
             .unwrap_or(&std::env::current_dir()?),
     );
     debug!("Searching for output file in: {}", parent.display());
+    debug!("Looking for pattern: {}", expected_filename_pattern);
 
-    let entries = std::fs::read_dir(parent)?;
+    let entries = std::fs::read_dir(&parent)?;
+    let mut matching_files = Vec::new();
+
+    for entry in entries {
+        let entry = entry?;
+        let filename = entry.file_name();
+        let filename_str = filename.to_string_lossy();
+        
+        if filename_str.contains(expected_filename_pattern) {
+            debug!("Found matching file: {}", entry.path().display());
+            matching_files.push((entry.path(), entry.metadata()?));
+        }
+    }
+
+    // If we found matching files, prefer the newest one
+    if !matching_files.is_empty() {
+        matching_files.sort_by(|(_, meta_a), (_, meta_b)| {
+            let time_a = meta_a.modified().unwrap_or(std::time::UNIX_EPOCH);
+            let time_b = meta_b.modified().unwrap_or(std::time::UNIX_EPOCH);
+            time_b.cmp(&time_a) // Sort newest first
+        });
+        
+        let file_path = matching_files[0].0.clone();
+        debug!("Selected file: {}", file_path.display());
+        return Ok(file_path);
+    }
+
+    // Fallback to original method if no matching files found
+    warn!("No files matching pattern '{}' found, falling back to newest file method", expected_filename_pattern);
+    
+    let entries = std::fs::read_dir(&parent)?;
     let mut newest_file = None;
     let mut newest_time = std::time::UNIX_EPOCH;
 
@@ -415,12 +482,16 @@ pub async fn get_video_info(url: &str) -> Result<VideoInfo> {
     let json = String::from_utf8_lossy(&output.stdout);
     let info: serde_json::Value = serde_json::from_str(&json)?;
 
+    debug!("Video metadata: {}", json);
+
     Ok(VideoInfo {
         title: info["title"].as_str().unwrap_or("Unknown").to_string(),
         duration: info["duration"].as_f64().unwrap_or(0.0),
         url: url.to_string(),
         thumbnail: info["thumbnail"].as_str().unwrap_or("").to_string(),
         description: info["description"].as_str().unwrap_or("").to_string(),
+        language: info["language"].as_str().map(|s| s.to_string()),
+        original_language: info["original_language"].as_str().map(|s| s.to_string()),
     })
 }
 
@@ -464,15 +535,4 @@ fn parse_progress(line: &str) -> Option<DownloadProgress> {
         eta,
         component: "unknown".to_string(), // Will be set by the caller
     })
-}
-
-/// Sanitize filename to be safe for all operating systems
-fn sanitize_filename(filename: &str) -> String {
-    filename
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            _ => c,
-        })
-        .collect()
 }

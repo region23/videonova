@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { listen } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
 import YouTubeInput from './YouTubeInput.vue'
 import LanguageSelector from './LanguageSelector.vue'
 import VideoPreview from './VideoPreview.vue'
@@ -34,6 +35,9 @@ const error = ref('')
 const selectedLanguages = ref<LanguagePair | null>(null)
 const videoInfo = ref<VideoInfo | null>(null)
 const showApiKeyUpdate = ref(false)
+const sourceLanguage = ref('')
+const currentUrl = ref('')
+const selectedPath = ref('')
 
 // Listen for the show-settings event
 let unlisten: (() => void) | undefined
@@ -52,6 +56,10 @@ const handleVideoInfo = (info: VideoInfo) => {
   videoInfo.value = info
 }
 
+const handleLanguageDetected = (code: string) => {
+  sourceLanguage.value = code
+}
+
 const handleDownloadStart = () => {
   if (!selectedLanguages.value) {
     error.value = 'Please select source and target languages first'
@@ -62,7 +70,6 @@ const handleDownloadStart = () => {
 }
 
 const handleDownloadComplete = (result: DownloadResult) => {
-  console.log('Download completed:', result)
   isProcessing.value = false
 }
 
@@ -82,6 +89,41 @@ const handleCancelUpdate = () => {
 const handleApiKeyUpdated = () => {
   showApiKeyUpdate.value = false
 }
+
+const handleStartDownload = async (url: string, path: string) => {
+  currentUrl.value = url
+  selectedPath.value = path
+}
+
+const handleProcessClick = async () => {
+  if (!videoInfo.value) {
+    error.value = 'Please enter a valid YouTube URL first'
+    return
+  }
+  if (!selectedLanguages.value) {
+    error.value = 'Please select languages first'
+    return
+  }
+  if (!currentUrl.value || !selectedPath.value) {
+    error.value = 'Please select a download folder first'
+    return
+  }
+
+  try {
+    isProcessing.value = true
+    error.value = ''
+    
+    const result = await invoke<DownloadResult>('download_video', {
+      url: currentUrl.value,
+      outputPath: selectedPath.value,
+    })
+    
+    handleDownloadComplete(result)
+  } catch (e) {
+    console.error('Failed to download:', e)
+    handleDownloadError(e instanceof Error ? e.message : 'Failed to download. Please try again.')
+  }
+}
 </script>
 
 <template>
@@ -90,15 +132,40 @@ const handleApiKeyUpdated = () => {
       <main>
         <div class="content-wrapper">
           <div class="content-card main-content">
-            <LanguageSelector @languages-selected="handleLanguagesSelected" />
-            <div class="divider"></div>
             <YouTubeInput 
               :disabled="isProcessing"
               @video-info="handleVideoInfo"
+              @language-detected="handleLanguageDetected"
               @download-start="handleDownloadStart"
               @download-complete="handleDownloadComplete"
               @download-error="handleDownloadError"
+              @start-download="handleStartDownload"
             />
+
+            <div class="divider"></div>
+
+            <LanguageSelector
+              :initial-source-language="sourceLanguage"
+              v-model:source-language="sourceLanguage"
+              @languages-selected="handleLanguagesSelected"
+            />
+
+            <div v-if="error" class="error-message">
+              {{ error }}
+            </div>
+
+            <button 
+              class="process-button"
+              :disabled="isProcessing || !videoInfo"
+              @click="handleProcessClick"
+            >
+              <span class="button-content">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" class="icon">
+                  <path d="M5 12h14m-4-4l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                {{ isProcessing ? 'Processing...' : 'Process Video' }}
+              </span>
+            </button>
           </div>
           
           <div class="content-card info-content">
@@ -157,6 +224,7 @@ main {
 .main-content {
   display: flex;
   flex-direction: column;
+  gap: 2rem;
 }
 
 .info-content {
@@ -167,7 +235,40 @@ main {
 .divider {
   height: 1px;
   background-color: var(--border-color);
-  margin: 2rem 0;
+
+}
+
+.error-message {
+  color: var(--error-color);
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+}
+
+.process-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+  padding: 0 16px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  border-radius: 8px;
+  background-color: var(--accent-primary);
+  color: white;
+  border: none;
+  cursor: pointer;
+  width: 100%;
+}
+
+.process-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.button-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 @media (max-width: 1200px) {

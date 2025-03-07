@@ -11,7 +11,8 @@ mod commands;
 mod utils;
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+    // Инициализируем логгер с тонкой настройкой
+    utils::logger::init_logger();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -65,6 +66,7 @@ fn main() {
             commands::get_video_info,
             commands::download_video,
             commands::validate_openai_key,
+            commands::transcribe_audio,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
