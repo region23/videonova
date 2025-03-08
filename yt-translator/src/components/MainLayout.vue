@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
+import { Store as TauriStore } from '@tauri-apps/plugin-store'
 import YouTubeInput from './YouTubeInput.vue'
 import LanguageSelector from './LanguageSelector.vue'
 import VideoPreview from './VideoPreview.vue'
@@ -30,6 +31,15 @@ interface DownloadResult {
   audio_path: string
 }
 
+interface ProcessVideoResult {
+  video_path: string
+  audio_path: string
+  transcription_path: string
+  translation_path: string
+  tts_path: string
+  final_path: string
+}
+
 const isProcessing = ref(false)
 const error = ref('')
 const selectedLanguages = ref<LanguagePair | null>(null)
@@ -38,7 +48,8 @@ const showApiKeyUpdate = ref(false)
 const sourceLanguage = ref('')
 const currentUrl = ref('')
 const selectedPath = ref('')
-const isMainContentLocked = ref(false)
+const isVideoInfoReady = ref(false)
+const isSourceLanguageDetected = ref(false)
 
 // Listen for the show-settings event
 let unlisten: (() => void) | undefined
@@ -66,11 +77,23 @@ onMounted(async () => {
 })
 
 const handleVideoInfo = (info: VideoInfo) => {
-  videoInfo.value = info
+  console.log('Video info received:', info ? 'present' : 'null/undefined');
+  
+  // Если информация о видео успешно загружена, устанавливаем isVideoInfoReady в true
+  if (info) {
+    console.log('Video info loaded successfully, setting isVideoInfoReady to true');
+    videoInfo.value = info;
+    isVideoInfoReady.value = true;
+  } else {
+    console.log('Video info is null/undefined, resetting state');
+    videoInfo.value = null;
+    isVideoInfoReady.value = false;
+  }
 }
 
 const handleLanguageDetected = (code: string) => {
   sourceLanguage.value = code
+  isSourceLanguageDetected.value = true
 }
 
 const handleDownloadStart = () => {
@@ -83,9 +106,6 @@ const handleDownloadStart = () => {
 }
 
 const handleDownloadComplete = (result: DownloadResult) => {
-  isProcessing.value = false
-  
-  // Отправляем событие download-complete в YouTubeInput
   console.log("Download completed in MainLayout, emitting result:", result)
 }
 
@@ -96,7 +116,6 @@ const handleTranscriptionProgress = (progress: any) => {
 
 const handleTranscriptionComplete = (result: any) => {
   console.log("Transcription complete in MainLayout:", result)
-  // Устанавливаем progress в 100%, чтобы гарантировать правильное состояние
   transcriptionProgress.value = { status: 'Complete', progress: 100 }
 }
 
@@ -107,7 +126,6 @@ const handleTranslationProgress = (progress: any) => {
 
 const handleTranslationComplete = (result: any) => {
   console.log("Translation complete in MainLayout:", result)
-  // Устанавливаем progress в 100%, чтобы гарантировать правильное состояние
   translationProgress.value = { status: 'Complete', progress: 100 }
 }
 
@@ -118,7 +136,6 @@ const handleTTSProgress = (progress: any) => {
 
 const handleTTSComplete = (result: any) => {
   console.log("TTS complete in MainLayout:", result)
-  // Устанавливаем progress в 100%, чтобы гарантировать правильное состояние
   ttsProgress.value = { status: 'Complete', progress: 100 }
 }
 
@@ -150,39 +167,102 @@ const handleStartDownload = async (url: string, path: string) => {
 }
 
 const handleProcessClick = async () => {
+  console.log('=== Process Video Started ===')
+  console.log('Initial state:', {
+    videoInfo: videoInfo.value,
+    selectedLanguages: selectedLanguages.value,
+    selectedPath: selectedPath.value,
+    isVideoInfoReady: isVideoInfoReady.value,
+    currentUrl: currentUrl.value,
+    isProcessing: isProcessing.value
+  })
+
   if (!videoInfo.value) {
+    console.warn('Process aborted: No video info available')
     error.value = 'Please enter a valid YouTube URL first'
     return
   }
   if (!selectedLanguages.value) {
+    console.warn('Process aborted: No languages selected')
     error.value = 'Please select languages first'
     return
   }
-  if (!currentUrl.value || !selectedPath.value) {
+  if (!selectedPath.value) {
+    console.warn('Process aborted: No download folder selected')
     error.value = 'Please select a download folder first'
+    return
+  }
+  if (!isVideoInfoReady.value) {
+    console.warn('Process aborted: Video info not ready')
+    error.value = 'Please wait for video information to load'
     return
   }
 
   try {
-    isProcessing.value = true
-    isMainContentLocked.value = true
-    error.value = ''
+    // Get API key from store
+    const store = await TauriStore.load('.settings.dat')
+    const apiKey = await store.get('openai-api-key') as string
     
-    const result = await invoke<DownloadResult>('download_video', {
+    if (!apiKey) {
+      console.warn('Process aborted: No API key found')
+      error.value = 'Please set your OpenAI API key in settings first'
+      showApiKeyUpdate.value = true
+      return
+    }
+
+    console.log('Starting video processing pipeline...')
+    console.log('Processing parameters:', {
       url: currentUrl.value,
       outputPath: selectedPath.value,
+      targetLanguage: selectedLanguages.value.target.code,
+      targetLanguageName: selectedLanguages.value.target.name
     })
     
-    handleDownloadComplete(result)
+    isProcessing.value = true
+    error.value = ''
+    
+    const result = await invoke<ProcessVideoResult>('process_video', {
+      url: currentUrl.value,
+      outputPath: selectedPath.value,
+      targetLanguage: selectedLanguages.value.target.code,
+      targetLanguageName: selectedLanguages.value.target.name,
+      apiKey: apiKey,
+      voice: 'alloy',
+      model: 'tts-1',
+      wordsPerSecond: 3.0
+    })
+    
+    console.log('Processing completed successfully:', result)
+    handleDownloadComplete({
+      video_path: result.video_path,
+      audio_path: result.audio_path
+    })
   } catch (e) {
-    console.error('Failed to download:', e)
-    handleDownloadError(e instanceof Error ? e.message : 'Failed to download. Please try again.')
+    console.error('Pipeline failed:', e)
+    console.error('Error details:', {
+      message: e instanceof Error ? e.message : 'Unknown error',
+      error: e
+    })
+    handleDownloadError(e instanceof Error ? e.message : 'Failed to process video. Please try again.')
   }
 }
 
 const handleMergeComplete = () => {
-  isMainContentLocked.value = false
   isProcessing.value = false
+  transcriptionProgress.value = null
+  translationProgress.value = null
+  ttsProgress.value = null
+  mergeProgress.value = null
+}
+
+const handleVideoInfoReadyStateChange = (isReady: boolean) => {
+  console.log('Video info ready state changed:', isReady, 'Current videoInfo:', videoInfo.value)
+  isVideoInfoReady.value = isReady
+  
+  // Если видео-информация не готова, сбрасываем флаг определения языка
+  if (!isReady) {
+    isSourceLanguageDetected.value = false
+  }
 }
 </script>
 
@@ -191,9 +271,10 @@ const handleMergeComplete = () => {
     <div v-if="!showApiKeyUpdate">
       <main>
         <div class="content-wrapper">
-          <div class="content-card main-content" :class="{ 'content-locked': isMainContentLocked }">
+          <div class="content-card main-content">
             <YouTubeInput 
               :disabled="isProcessing"
+              :folder-select-disabled="!isVideoInfoReady || isProcessing"
               @video-info="handleVideoInfo"
               @language-detected="handleLanguageDetected"
               @download-start="handleDownloadStart"
@@ -220,6 +301,8 @@ const handleMergeComplete = () => {
               v-model:source-language="sourceLanguage"
               @languages-selected="handleLanguagesSelected"
               class="language-selector-section"
+              :disabled="!isVideoInfoReady || isProcessing"
+              :source-language-detected="isSourceLanguageDetected"
             />
 
             <div v-if="error" class="error-message">
@@ -228,7 +311,7 @@ const handleMergeComplete = () => {
 
             <button 
               class="process-button"
-              :disabled="isProcessing || !videoInfo"
+              :disabled="isProcessing || !videoInfo || !isVideoInfoReady || !selectedPath"
               @click="handleProcessClick"
             >
               <span class="button-content">
@@ -244,6 +327,7 @@ const handleMergeComplete = () => {
             <VideoPreview 
               :video-info="videoInfo"
               @merge-complete="handleMergeComplete"
+              @video-info-ready-state-change="handleVideoInfoReadyStateChange"
               :transcription-progress="transcriptionProgress"
               :translation-progress="translationProgress"
               :tts-progress="ttsProgress"
@@ -296,28 +380,9 @@ main {
 
 .main-content {
   position: relative;
-  transition: opacity 0.3s ease, filter 0.3s ease;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-}
-
-.content-locked {
-  opacity: 0.7;
-  pointer-events: none;
-  filter: grayscale(0.5);
-}
-
-.content-locked::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(255, 255, 255, 0.5);
-  border-radius: 12px;
-  cursor: not-allowed;
 }
 
 .info-content {
@@ -333,6 +398,12 @@ main {
 
 .error-message {
   color: var(--error-color);
+  font-size: 0.8rem;
+  margin-top: 0.125rem;
+}
+
+.hint-message {
+  color: var(--accent-secondary, #4cd964);
   font-size: 0.8rem;
   margin-top: 0.125rem;
 }
@@ -358,6 +429,7 @@ main {
 .process-button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+  pointer-events: none;
 }
 
 .button-content {

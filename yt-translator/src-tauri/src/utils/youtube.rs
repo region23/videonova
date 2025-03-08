@@ -10,7 +10,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use super::tools::get_tool_path;
-use crate::utils::common::sanitize_filename;
+use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VideoInfo {
@@ -47,6 +47,24 @@ pub async fn download_video(
     info!("Starting video download process for URL: {}", url);
     debug!("Output directory: {}", output_dir.display());
 
+    // Get video info first to get the title
+    info!("Fetching video information...");
+    let video_info = get_video_info(url).await?;
+    let safe_title = sanitize_filename(&video_info.title);
+    info!("Video title: {}", safe_title);
+
+    // Check if files already exist
+    let video_path = output_dir.join(format!("{}_video.mp4", safe_title));
+    let audio_path = output_dir.join(format!("{}_audio.m4a", safe_title));
+
+    if check_file_exists_and_valid(&video_path).await && check_file_exists_and_valid(&audio_path).await {
+        info!("Found existing video and audio files, skipping download");
+        return Ok(DownloadResult {
+            video_path,
+            audio_path,
+        });
+    }
+
     // Create cancellation token
     let cancellation_token = CancellationToken::new();
     let token_clone = cancellation_token.clone();
@@ -66,12 +84,6 @@ pub async fn download_video(
     // Create output directory if it doesn't exist
     std::fs::create_dir_all(output_dir)?;
     debug!("Ensured output directory exists");
-
-    // Get video info first to get the title
-    info!("Fetching video information...");
-    let video_info = get_video_info(url).await?;
-    let safe_title = sanitize_filename(&video_info.title);
-    info!("Video title: {}", safe_title);
 
     // Store child processes for cleanup
     let child_processes = Arc::new(Mutex::new(Vec::new()));

@@ -4,6 +4,8 @@ import { languages, findLanguageByCode } from '../utils/languages'
 
 const props = defineProps<{
   initialSourceLanguage?: string
+  disabled?: boolean
+  sourceLanguageDetected?: boolean
 }>()
 
 const sourceLanguage = ref(props.initialSourceLanguage ? findLanguageByCode(props.initialSourceLanguage) : languages[0])
@@ -29,21 +31,26 @@ watch(() => props.initialSourceLanguage, (newCode) => {
     <h2>Select Languages</h2>
     <div class="language-pair">
       <div class="language-select">
-        <label for="source-language">From</label>
-        <select
-          id="source-language"
-          v-model="sourceLanguage"
-          :disabled="targetLanguage.code === sourceLanguage.code"
-        >
-          <option
-            v-for="lang in languages"
-            :key="lang.code"
-            :value="lang"
-            :disabled="targetLanguage.code === lang.code"
+        <div class="label-container">
+          <label for="source-language">From</label>
+          <span v-if="props.sourceLanguageDetected" class="auto-detected-badge">Auto-detected</span>
+        </div>
+        <div class="select-wrapper">
+          <select
+            id="source-language"
+            v-model="sourceLanguage"
+            :disabled="targetLanguage.code === sourceLanguage.code || props.disabled || props.sourceLanguageDetected"
           >
-            {{ lang.name }}
-          </option>
-        </select>
+            <option
+              v-for="lang in languages"
+              :key="lang.code"
+              :value="lang"
+              :disabled="targetLanguage.code === lang.code"
+            >
+              {{ lang.name }}
+            </option>
+          </select>
+        </div>
       </div>
 
       <div class="language-divider">
@@ -57,7 +64,7 @@ watch(() => props.initialSourceLanguage, (newCode) => {
         <select
           id="target-language"
           v-model="targetLanguage"
-          :disabled="sourceLanguage.code === targetLanguage.code"
+          :disabled="sourceLanguage.code === targetLanguage.code || props.disabled"
         >
           <option
             v-for="lang in languages"
@@ -108,12 +115,18 @@ h2 {
   margin-bottom: 4px;
 }
 
+.label-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 0.80rem;
+}
+
 label {
   font-size: 0.875rem;
   font-weight: 500;
   color: var(--text-secondary);
   text-align: left;
-  padding-left: 0.80rem;
 }
 
 select {
@@ -129,6 +142,7 @@ select {
 select:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  pointer-events: none;
 }
 
 @media (max-width: 640px) {
@@ -145,5 +159,20 @@ select:disabled {
   .language-select {
     width: 100%;
   }
+}
+
+.select-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.auto-detected-badge {
+  font-size: 0.7rem;
+  background-color: var(--accent-secondary, #4cd964);
+  color: white;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  display: inline-block;
 }
 </style> 

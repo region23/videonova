@@ -7,7 +7,7 @@ use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_util::codec::{BytesCodec, FramedRead};
-use crate::utils::common::sanitize_filename;
+use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TranscriptionProgress {
@@ -129,7 +129,14 @@ pub async fn transcribe_audio(
     progress_sender: Option<mpsc::Sender<TranscriptionProgress>>,
 ) -> Result<PathBuf> {
     info!("Starting transcription process for file: {}", audio_path.display());
-    debug!("Using OpenAI API key: {}...", &api_key[..4]); // Показываем только первые 4 символа ключа
+    
+    // Validate API key
+    if api_key.trim().is_empty() {
+        error!("OpenAI API key is empty");
+        return Err(anyhow!("OpenAI API key is required for transcription"));
+    }
+    
+    debug!("Using OpenAI API key: {}...", if api_key.len() >= 4 { &api_key[..4] } else { "[invalid]" });
     if let Some(lang) = &language {
         debug!("Using language: {}", lang);
     }
@@ -196,6 +203,12 @@ pub async fn transcribe_audio(
     
     let output_path = output_dir.join(format!("{}.{}", sanitized_file_stem, file_extension));
     debug!("Output will be saved to: {}", output_path.display());
+
+    // Check if transcription file already exists
+    if check_file_exists_and_valid(&output_path).await {
+        info!("Found existing transcription file, skipping transcription");
+        return Ok(output_path);
+    }
 
     // Send initial progress
     if let Some(sender) = &progress_sender {

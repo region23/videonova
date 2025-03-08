@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use reqwest;
 use std::time::Duration;
-use crate::utils::common::sanitize_filename;
+use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
 
 // Progress structure for translation
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -263,6 +263,22 @@ pub async fn translate_vtt(
     // Create output directory if it doesn't exist
     fs::create_dir_all(output_dir).await?;
     
+    // Create output file path with language suffix
+    let file_stem = vtt_path
+        .file_stem()
+        .ok_or_else(|| anyhow!("Failed to get file stem"))?
+        .to_string_lossy();
+    
+    let sanitized_file_stem = sanitize_filename(&file_stem);
+    let output_path = output_dir.join(format!("{}_{}.vtt", sanitized_file_stem, target_language_code));
+    debug!("Output will be saved to: {}", output_path.display());
+
+    // Check if translation file already exists
+    if check_file_exists_and_valid(&output_path).await {
+        info!("Found existing translation file, skipping translation");
+        return Ok(output_path);
+    }
+    
     // Parse VTT file
     if let Some(sender) = &progress_sender {
         sender
@@ -280,16 +296,6 @@ pub async fn translate_vtt(
     if vtt_file.segments.is_empty() {
         return Err(anyhow!("No segments found in VTT file"));
     }
-    
-    // Create output file path with language suffix
-    let file_stem = vtt_path
-        .file_stem()
-        .ok_or_else(|| anyhow!("Failed to get file stem"))?
-        .to_string_lossy();
-    
-    let sanitized_file_stem = sanitize_filename(&file_stem);
-    let output_path = output_dir.join(format!("{}_{}.vtt", sanitized_file_stem, target_language_code));
-    debug!("Output will be saved to: {}", output_path.display());
     
     // Process in batches of 10 segments
     const BATCH_SIZE: usize = 10;

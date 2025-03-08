@@ -1,5 +1,7 @@
 //! Common utility functions used across the application
 
+use std::path::Path;
+
 /// Sanitize filename to be safe for all operating systems.
 /// Converts the filename to lowercase and replaces special characters with underscores.
 /// 
@@ -15,6 +17,16 @@ pub fn sanitize_filename(input: &str) -> String {
         result = result.replace(c, "_");
     }
     result
+}
+
+/// Check if a file exists and has valid content (non-zero size)
+pub async fn check_file_exists_and_valid(path: &Path) -> bool {
+    if let Ok(metadata) = tokio::fs::metadata(path).await {
+        if metadata.is_file() && metadata.len() > 0 {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

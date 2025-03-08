@@ -1,7 +1,6 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use env_logger;
 use log::error;
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 use tauri::{Emitter, Manager};
@@ -70,6 +69,7 @@ fn main() {
             commands::translate_vtt,
             commands::generate_speech,
             commands::merge_media,
+            commands::process_video,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

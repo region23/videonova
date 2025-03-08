@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tokio::sync::mpsc;
 use regex::Regex;
+use log::info;
+use crate::utils::common::check_file_exists_and_valid;
 
 /// Structure for holding TTS progress information
 #[derive(Clone, Serialize, Deserialize)]
@@ -183,6 +185,15 @@ pub async fn generate_tts(
     if !output_dir.exists() {
         fs::create_dir_all(output_dir)?;
     }
+
+    // Define output file path
+    let output_file = output_dir.join(format!("{}.mp3", base_filename));
+
+    // Check if TTS file already exists
+    if check_file_exists_and_valid(&output_file).await {
+        info!("Found existing TTS file, skipping TTS generation");
+        return Ok(output_file);
+    }
     
     // Parse VTT file
     let segments = parse_vtt_file(vtt_file)?;
@@ -317,7 +328,6 @@ pub async fn generate_tts(
     }
     
     // Combine all segments using ffmpeg
-    let output_file = output_dir.join(format!("{}_tts.mp3", base_filename));
     let status = Command::new("ffmpeg")
         .args([
             "-f", "concat",

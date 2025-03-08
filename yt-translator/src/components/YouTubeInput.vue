@@ -41,6 +41,7 @@ interface MergeResult {
 
 const props = defineProps<{
   disabled?: boolean
+  folderSelectDisabled?: boolean
   sourceLanguage?: string
   targetLanguage?: string
   targetLanguageCode?: string
@@ -333,7 +334,11 @@ const startMerge = async () => {
     ttsAudioPath: ttsAudioPath.value,
     vttPath: vttPath.value,
     translatedVttPath: translatedVttPath.value,
-    videoPathValue: videoPath.value
+    videoPathValue: videoPath.value,
+    downloadResultPaths: downloadResult.value ? {
+      video: downloadResult.value.video_path,
+      audio: downloadResult.value.audio_path
+    } : null
   }
   
   console.log('Merge prerequisites debug info:', debugInfo)
@@ -344,24 +349,54 @@ const startMerge = async () => {
     return
   }
   
-  // Если downloadResult недоступен, используем videoPath напрямую
-  // Если у нас есть пути к файлам из разных источников, выбираем первый доступный
-  const videoFilePath = 
-    (downloadResult.value?.video_path) || 
-    videoPath.value || 
-    (audioPath.value?.replace('_audio.m4a', '.mp4'))
+  // Получаем путь к видеофайлу из нескольких источников
+  // Приоритет для источников:
+  // 1. downloadResult.video_path - самый надежный источник от Tauri
+  // 2. videoPath, если его формат похож на медиафайл
+  // 3. На основе аудиофайла, заменяя суффикс
   
+  // Проверим, есть ли прямой путь от загрузки
+  let videoFilePath = downloadResult.value?.video_path
+  
+  // Если нет прямого пути, используем videoPath, только если он выглядит как медиафайл
+  if (!videoFilePath && videoPath.value && videoPath.value.match(/\.(mp4|mkv|webm|avi|mov)$/i)) {
+    videoFilePath = videoPath.value
+    console.log('Using videoPath variable as video path:', videoFilePath)
+  }
+  
+  // Если все еще нет пути, попробуем сформировать его из аудиопути
+  if (!videoFilePath && audioPath.value && audioPath.value.endsWith('_audio.m4a')) {
+    videoFilePath = audioPath.value.replace('_audio.m4a', '.mp4')
+    console.log('Derived video path from audio path:', videoFilePath)
+  }
+  
+  // Финальная проверка наличия видеопути
   if (!videoFilePath) {
-    console.error('Video path is not available. Debug info:', debugInfo)
-    emit('merge-error', 'Video path is not available. Cannot proceed with merge.')
+    console.error('Could not determine valid video path from any source:', debugInfo)
+    emit('merge-error', 'Valid video path could not be determined. Cannot proceed with merge.')
+    return
+  }
+  
+  // Дополнительная проверка на директорию
+  if (!videoFilePath.match(/\.(mp4|mkv|webm|avi|mov)$/i)) {
+    console.error('Path does not have valid video extension, likely a directory:', videoFilePath)
+    emit('merge-error', `Invalid video path format: ${videoFilePath}. Path should be a file with video extension.`)
     return
   }
   
   try {
     isMerging.value = true
     
-    // Сохраняем путь к видео для последующего использования
+    // Сохраняем правильный путь к видео для последующего использования
     videoPath.value = videoFilePath
+    
+    // Явно показываем все пути для отладки
+    console.log('=== FINAL PATHS FOR MERGE ===')
+    console.log('Video path:', videoFilePath)
+    console.log('Audio path:', ttsAudioPath.value)
+    console.log('Original VTT path:', vttPath.value)
+    console.log('Translated VTT path:', translatedVttPath.value)
+    console.log('Output directory:', selectedPath.value)
     
     // Listen for merge progress
     const unlistenMergeProgress = await listen('merge-progress', (event) => {
@@ -369,13 +404,20 @@ const startMerge = async () => {
       emit('merge-progress', event.payload)
     })
     
+    // Добавляем слушатель ошибок слияния
+    const unlistenMergeError = await listen('merge-error', (event) => {
+      console.error('Merge error received from backend:', event.payload)
+      emit('merge-error', String(event.payload))
+    })
+    
     setTimeout(async () => {
       try {
-        console.log('Starting media merge with paths:', {
+        console.log('Invoking merge_media with paths:', {
           videoPath: videoFilePath,
           audioPath: ttsAudioPath.value,
           vttPath: vttPath.value,
-          translatedVttPath: translatedVttPath.value
+          translatedVttPath: translatedVttPath.value,
+          outputPath: selectedPath.value
         })
         
         const result = await invoke<MergeResult>('merge_media', {
@@ -387,12 +429,17 @@ const startMerge = async () => {
         })
         
         unlistenMergeProgress()
+        unlistenMergeError()
         console.log('Merge complete, result:', result)
         
         emit('merge-complete', result)
       } catch (e) {
         console.error('Failed to merge media:', e)
         emit('merge-error', e instanceof Error ? e.message : 'Failed to merge media. Please try again.')
+        
+        // Очищаем слушателей в случае ошибки
+        unlistenMergeProgress()
+        unlistenMergeError()
       }
     }, 100)
   } catch (e) {
@@ -427,7 +474,7 @@ const normalizeLanguageCode = (code: string): string => {
             type="button" 
             class="folder-button" 
             @click="selectFolder"
-            :disabled="disabled || isLoading"
+            :disabled="disabled || isLoading || folderSelectDisabled"
             :title="selectedPath || 'Select folder where the video will be downloaded'"
           >
             <span class="button-content">
@@ -538,6 +585,7 @@ input[type="url"] {
 button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+  pointer-events: none;
 }
 
 /* Медиа-запрос для адаптации под мобильные устройства */
