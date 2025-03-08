@@ -54,8 +54,8 @@ defineProps<{
 .step {
   display: flex;
   align-items: center;
-  flex: 1;
   position: relative;
+  flex: 1;
 }
 
 .step-circle {

@@ -445,17 +445,8 @@ pub async fn merge_files(
         }
     };
     
-    let audio_index = match streams.iter()
-        .position(|s| s.get("codec_type").and_then(|t| t.as_str()) == Some("audio")) {
-        Some(idx) => {
-            info!("Found audio stream at index {}", idx);
-            idx
-        },
-        None => {
-            error!("No audio stream found in input file");
-            return Err(anyhow!("No audio stream found"));
-        }
-    };
+    // Убираем проверку аудио потока, так как видео намеренно скачивается без аудио
+    info!("Skipping audio stream check in video file as it's downloaded without audio");
     
     // Проверяем аудиофайл до начала обработки
     info!("Checking translated audio file details");

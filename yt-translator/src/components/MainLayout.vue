@@ -221,6 +221,13 @@ const handleProcessClick = async () => {
     isProcessing.value = true
     error.value = ''
     
+    // Initialize progress states immediately
+    // Сначала показываем только подготовку к загрузке
+    transcriptionProgress.value = null
+    translationProgress.value = null
+    ttsProgress.value = null
+    mergeProgress.value = null
+    
     const result = await invoke<ProcessVideoResult>('process_video', {
       url: currentUrl.value,
       outputPath: selectedPath.value,

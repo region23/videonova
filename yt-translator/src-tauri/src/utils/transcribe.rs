@@ -97,28 +97,7 @@ impl MultipartFormBuilder {
         format!("multipart/form-data; boundary={}", self.boundary)
     }
 
-    // Метод для отладки - возвращает текстовое представление формы (без бинарных данных)
-    fn debug_preview(&self) -> String {
-        let mut preview = String::new();
-        let mut parts: Vec<&[u8]> = self.body.split(|b| *b == b'\r' || *b == b'\n').collect();
-        
-        for part in parts {
-            if part.is_empty() { continue; }
-            
-            if let Ok(text) = std::str::from_utf8(part) {
-                if text.contains("filename=") {
-                    preview.push_str(text);
-                    preview.push_str("\n[BINARY DATA]\n");
-                } else {
-                    preview.push_str(text);
-                    preview.push('\n');
-                }
-            } else {
-                preview.push_str("[BINARY DATA]\n");
-            }
-        }
-        preview
-    }
+    
 }
 
 pub async fn transcribe_audio(
@@ -249,9 +228,7 @@ pub async fn transcribe_audio(
     // Добавляем файл
     form.add_file("file", &filename, &file_content, "application/octet-stream");
 
-    // Логируем структуру запроса для отладки
-    debug!("Multipart form structure:\n{}", form.debug_preview());
-    
+
     // Получаем финальное тело запроса
     let body = form.finish();
     
