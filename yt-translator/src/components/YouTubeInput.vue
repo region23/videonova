@@ -293,7 +293,8 @@ const startTTS = async (translatedVttPath: string) => {
       voice: 'alloy',
       model: 'tts-1',
       wordsPerSecond: 3.0,
-      baseFilename: translatedVttPath.split('/').pop()?.split('.')[0] || 'output'
+      baseFilename: translatedVttPath.split('/').pop()?.split('.')[0] || 'output',
+      languageSuffix: `_${props.targetLanguageCode}`
     })
 
     const result = await invoke<TTSResult>('generate_speech', {
@@ -303,7 +304,8 @@ const startTTS = async (translatedVttPath: string) => {
       voice: 'alloy',
       model: 'tts-1',
       wordsPerSecond: 3.0,
-      baseFilename: translatedVttPath.split('/').pop()?.split('.')[0] || 'output'
+      baseFilename: translatedVttPath.split('/').pop()?.split('.')[0] || 'output',
+      languageSuffix: `_${props.targetLanguageCode}`
     })
     
     console.log('TTS generation complete, result:', result)
@@ -323,7 +325,17 @@ const startTTS = async (translatedVttPath: string) => {
 
 // Add merge progress listener
 const startMerge = async () => {
-  console.log('Starting merge process, checking for required files...')
+  console.log('=== START MERGE CALLED ===')
+  console.log('Current state:', {
+    isMerging: isMerging.value,
+    ttsAudioPath: ttsAudioPath.value,
+    vttPath: vttPath.value,
+    translatedVttPath: translatedVttPath.value,
+    downloadResult: downloadResult.value,
+    videoPath: videoPath.value,
+    audioPath: audioPath.value,
+  })
+
   // Проверяем наличие всех необходимых файлов и собираем отладочную информацию
   const debugInfo = {
     ttsAudio: !!ttsAudioPath.value,
@@ -350,13 +362,11 @@ const startMerge = async () => {
   }
   
   // Получаем путь к видеофайлу из нескольких источников
-  // Приоритет для источников:
-  // 1. downloadResult.video_path - самый надежный источник от Tauri
-  // 2. videoPath, если его формат похож на медиафайл
-  // 3. На основе аудиофайла, заменяя суффикс
+  console.log('Determining video file path...')
   
   // Проверим, есть ли прямой путь от загрузки
   let videoFilePath = downloadResult.value?.video_path
+  console.log('Video path from download result:', videoFilePath)
   
   // Если нет прямого пути, используем videoPath, только если он выглядит как медиафайл
   if (!videoFilePath && videoPath.value && videoPath.value.match(/\.(mp4|mkv|webm|avi|mov)$/i)) {
@@ -377,14 +387,8 @@ const startMerge = async () => {
     return
   }
   
-  // Дополнительная проверка на директорию
-  if (!videoFilePath.match(/\.(mp4|mkv|webm|avi|mov)$/i)) {
-    console.error('Path does not have valid video extension, likely a directory:', videoFilePath)
-    emit('merge-error', `Invalid video path format: ${videoFilePath}. Path should be a file with video extension.`)
-    return
-  }
-  
   try {
+    console.log('Starting merge process...')
     isMerging.value = true
     
     // Сохраняем правильный путь к видео для последующего использования
@@ -393,29 +397,34 @@ const startMerge = async () => {
     // Явно показываем все пути для отладки
     console.log('=== FINAL PATHS FOR MERGE ===')
     console.log('Video path:', videoFilePath)
-    console.log('Audio path:', ttsAudioPath.value)
+    console.log('Translated Audio path:', ttsAudioPath.value)
+    console.log('Original Audio path:', downloadResult.value?.audio_path)
     console.log('Original VTT path:', vttPath.value)
     console.log('Translated VTT path:', translatedVttPath.value)
     console.log('Output directory:', selectedPath.value)
     
     // Listen for merge progress
+    console.log('Setting up merge progress listener...')
     const unlistenMergeProgress = await listen('merge-progress', (event) => {
       console.log('Merge progress received:', event.payload)
       emit('merge-progress', event.payload)
     })
     
     // Добавляем слушатель ошибок слияния
+    console.log('Setting up merge error listener...')
     const unlistenMergeError = await listen('merge-error', (event) => {
       console.error('Merge error received from backend:', event.payload)
       emit('merge-error', String(event.payload))
     })
     
+    console.log('Preparing to invoke merge_media...')
     setTimeout(async () => {
       try {
         console.log('Invoking merge_media with paths:', {
           videoPath: videoFilePath,
-          audioPath: ttsAudioPath.value,
-          vttPath: vttPath.value,
+          translatedAudioPath: ttsAudioPath.value,
+          originalAudioPath: downloadResult.value?.audio_path,
+          originalVttPath: vttPath.value,
           translatedVttPath: translatedVttPath.value,
           outputPath: selectedPath.value
         })
@@ -423,14 +432,15 @@ const startMerge = async () => {
         const result = await invoke<MergeResult>('merge_media', {
           videoPath: videoFilePath,
           translatedAudioPath: ttsAudioPath.value,
+          originalAudioPath: downloadResult.value?.audio_path,
           originalVttPath: vttPath.value,
           translatedVttPath: translatedVttPath.value,
           outputPath: selectedPath.value,
         })
         
+        console.log('Merge completed successfully:', result)
         unlistenMergeProgress()
         unlistenMergeError()
-        console.log('Merge complete, result:', result)
         
         emit('merge-complete', result)
       } catch (e) {
@@ -458,14 +468,12 @@ const normalizeLanguageCode = (code: string): string => {
 <template>
   <div class="youtube-input">
     <div class="main-column">
-      <h2>Enter Video URL</h2>
-      
       <form @submit.prevent="startDownload" class="input-form">
         <div class="url-input-group">
           <input
             v-model="youtubeUrl"
             type="url"
-            placeholder="https://www.youtube.com/watch?v=..."
+            placeholder="paste youtube videolink here..."
             required
             :disabled="disabled || isLoading"
             @input="getVideoInfo"
@@ -485,7 +493,7 @@ const normalizeLanguageCode = (code: string): string => {
                 ...{{ selectedPath.split('/').slice(-1)[0] }}
               </span>
               <span class="folder-path" v-else>
-                Select Folder
+                Where to save
               </span>
             </span>
           </button>

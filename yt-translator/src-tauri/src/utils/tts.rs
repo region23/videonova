@@ -179,6 +179,7 @@ pub async fn generate_tts(
     model: &str,
     words_per_second: f64,
     base_filename: &str,
+    language_suffix: &str,
     progress_channel: Option<mpsc::Sender<TTSProgress>>,
 ) -> Result<PathBuf> {
     // Make sure output directory exists
@@ -186,14 +187,17 @@ pub async fn generate_tts(
         fs::create_dir_all(output_dir)?;
     }
 
-    // Define output file path
-    let output_file = output_dir.join(format!("{}.mp3", base_filename));
-
+    // Define output file path with the correct format
+    let language_code = language_suffix.trim_start_matches('_');
+    let output_file = output_dir.join(format!("{}_{}.mp3", base_filename, language_code));
+    
     // Check if TTS file already exists
     if check_file_exists_and_valid(&output_file).await {
-        info!("Found existing TTS file, skipping TTS generation");
+        info!("Found existing TTS file: {}", output_file.display());
         return Ok(output_file);
     }
+
+    info!("Will create new TTS file: {}", output_file.display());
     
     // Parse VTT file
     let segments = parse_vtt_file(vtt_file)?;
@@ -399,7 +403,7 @@ pub async fn generate_tts(
         }).await?;
     }
 
-    Ok(output_file)
+    Ok(output_file.clone())
 }
 
 /// Get the duration of an audio file using ffmpeg

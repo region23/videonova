@@ -28,7 +28,6 @@ watch(() => props.initialSourceLanguage, (newCode) => {
 
 <template>
   <div class="language-selector">
-    <h2>Select Languages</h2>
     <div class="language-pair">
       <div class="language-select">
         <div class="label-container">

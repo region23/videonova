@@ -345,6 +345,7 @@ pub async fn generate_speech(
     model: String,
     words_per_second: f64,
     base_filename: String,
+    language_suffix: String,
     window: tauri::Window,
 ) -> Result<TTSResult, String> {
     // Create progress channel
@@ -375,6 +376,7 @@ pub async fn generate_speech(
         &model,
         words_per_second,
         &base_filename,
+        &language_suffix,
         Some(tx),
     )
     .await
@@ -562,6 +564,7 @@ pub async fn process_video(
         model,
         words_per_second,
         translation_result.base_filename.clone(),
+        target_language.clone(),
         window.clone(),
     ).await {
         Ok(result) => {

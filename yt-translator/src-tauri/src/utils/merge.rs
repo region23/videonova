@@ -201,7 +201,7 @@ pub async fn merge_files(
         .to_string();
 
     // Create output file path with language code
-    let output_file = output_dir.join(format!("{}_{}.mp4", filename, lang_code));
+    let output_file = output_dir.join(format!("{}_{}.mkv", filename, lang_code));
     info!("Output file will be: {}", output_file.display());
 
     // Check if merged file already exists
@@ -209,6 +209,9 @@ pub async fn merge_files(
         info!("Found existing merged file, skipping merge process");
         return Ok(output_file);
     }
+
+    // Если финальный файл не существует, проверяем наличие всех входных файлов
+    info!("Final merged file does not exist, checking input files...");
     
     // Добавляем проверку, что видео и аудио пути не являются директориями
     // Для каждого пути проверяем, что:
