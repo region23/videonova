@@ -290,43 +290,59 @@ pub async fn merge_files(
         .arg(&original_ass)
         .arg("-i")
         .arg(&translated_ass)
+        // Map streams in the correct order
         .arg("-map")
-        .arg("0:v") // Take video from first input
+        .arg("0:v") // Video stream
         .arg("-map")
-        .arg("1:a") // Take translated audio from second input
+        .arg("1:a") // First audio track: Translated
         .arg("-map")
-        .arg("2:a") // Take original audio from third input
+        .arg("2:a") // Second audio track: Original
         .arg("-map")
         .arg("3") // Original subtitles
         .arg("-map")
         .arg("4") // Translated subtitles
+        // Video settings for compatibility
         .arg("-c:v")
-        .arg("libx264") // Force encoding to h.264 for QuickTime compatibility
+        .arg("libx264")
         .arg("-pix_fmt")
-        .arg("yuv420p") // Ensure pixel format compatibility
+        .arg("yuv420p")
         .arg("-profile:v")
         .arg("high")
         .arg("-level")
         .arg("4.1")
+        // Audio settings
         .arg("-c:a")
-        .arg("aac") // Use AAC for audio
+        .arg("aac")
         .arg("-b:a")
         .arg("192k")
+        // Subtitle settings
         .arg("-c:s")
-        .arg("mov_text") // Use mov_text codec for subtitles
+        .arg("mov_text")
+        // Create mixed audio track and add as third audio stream
         .arg("-filter_complex")
-        .arg("[1:a]volume=1[ta];[2:a]volume=0.3[oa];[ta][oa]amix=inputs=2:normalize=0[a]")
+        .arg("[1:a]volume=1.2[ta];[2:a]volume=0.05[oa];[ta][oa]amix=inputs=2:normalize=1[a]")
         .arg("-map")
         .arg("[a]")
-        // Language metadata
+        // Set metadata for all audio tracks
+        // First audio track (translated)
         .arg("-metadata:s:a:0")
         .arg(format!("language={}", target_language_code))
         .arg("-metadata:s:a:0")
+        .arg(format!("title={} Audio", target_language_name))
+        // Second audio track (original)
+        .arg("-metadata:s:a:1")
+        .arg(format!("language={}", source_language_code))
+        .arg("-metadata:s:a:1")
+        .arg(format!("title={} Audio", source_language_name))
+        // Third audio track (mixed)
+        .arg("-metadata:s:a:2")
+        .arg(format!("language={}", target_language_code))
+        .arg("-metadata:s:a:2")
         .arg(format!(
-            "title={} Audio + Original Mix",
-            target_language_name
+            "title={} Audio + {} Background",
+            target_language_name, source_language_name
         ))
-        // Subtitle metadata
+        // Subtitle metadata remains the same
         .arg("-metadata:s:s:0")
         .arg(format!("language={}", source_language_code))
         .arg("-metadata:s:s:0")
