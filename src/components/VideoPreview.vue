@@ -604,26 +604,21 @@ onMounted(async () => {
   const unlistenMergeComplete = await listen<MergeResult>('merge-complete', (event) => {
     console.log('Merge complete event received in VideoPreview:', event.payload);
     
-    // Устанавливаем финальный статус прогресса
+    // Set final progress status
     mergeProgress.value = { 
       status: 'Processing complete',
       progress: 100.0
     };
-    logComponentState('merge complete event received');
     
-    // Отмечаем процесс слияния как завершенный через некоторое время
-    setTimeout(() => {
-      isMerging.value = false;
-      translationComplete.value = true;
-      
-      // ВАЖНО: не обнуляем mergeProgress, чтобы сохранить отображение
-      // прогрессбара на финальном экране
-    }, 2000);
+    // Important: Mark merge as complete and update step status
+    isMerging.value = false;
+    mergeStepComplete.value = true;
+    translationComplete.value = true;
     
-    // Устанавливаем путь к выходной директории
+    // Set output directory
     outputDirectory.value = event.payload.output_dir;
     
-    // Отправляем событие выше
+    // Only emit this event once
     emit('merge-complete', event.payload.output_dir);
   });
 
@@ -652,6 +647,12 @@ onMounted(async () => {
     isMerging.value = false;
   });
 
+  // Add this listener for merge start event if not already present
+  const unlistenMergeStart = await listen('merge-start', () => {
+    console.log('Merge start event received');
+    isMerging.value = true;
+  });
+
   onUnmounted(() => {
     unlisten?.();
     unlistenDownloadComplete?.();
@@ -662,6 +663,7 @@ onMounted(async () => {
     unlistenMergeProgress?.();
     unlistenMergeComplete?.();
     unlistenMergeError?.();
+    unlistenMergeStart?.();
     
     // Clean up the URL input listener
     if (urlInputListener) {
@@ -774,28 +776,12 @@ watch(() => props.translationProgress, (newProgress) => {
 
 // Оптимизированный обработчик для Merge
 watch(() => props.mergeProgress, (newProgress) => {
-  if (newProgress) {
+  if (newProgress && !translationComplete.value) {
     trackUIBlocking('Merge progress update');
+    mergeProgress.value = newProgress;
+    isMerging.value = newProgress.progress < 100;
     
-    // Откладываем обновление состояния для предотвращения блокировки UI
-    setTimeout(() => {
-      mergeProgress.value = newProgress;
-      isMerging.value = true;
-      
-      // Обработка завершения
-      if (newProgress.progress >= 100) {
-        // При финальном шаге не очищаем состояние, 
-        // а переходим к завершению
-        setTimeout(() => {
-          isMerging.value = false;
-          
-          // Проверяем, не находимся ли мы уже в завершенном состоянии
-          if (!translationComplete.value) {
-            translationComplete.value = true;
-          }
-        }, 1000);
-      }
-    }, 0);
+    // Don't set translationComplete here - wait for the merge-complete event
   }
 }, { immediate: true })
 
@@ -1417,4 +1403,4 @@ defineExpose({
   text-align: left;
   font-weight: 400;
 }
-</style> 
+</style>

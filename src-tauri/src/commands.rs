@@ -1,18 +1,21 @@
+use anyhow::anyhow;
+use log::{error, info, warn};
 use reqwest;
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tauri::Emitter;
 use tokio::sync::mpsc;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use anyhow::anyhow;
-use log::{info, warn, error};
 
-use crate::utils::youtube::{self, DownloadProgress, VideoInfo};
+use crate::utils::common::{check_file_exists_and_valid, sanitize_filename};
+use crate::utils::merge;
 use crate::utils::transcribe;
 use crate::utils::translate;
 use crate::utils::tts;
-use crate::utils::merge;
-use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
+use crate::utils::youtube::{self, DownloadProgress, VideoInfo};
 
 #[derive(Clone, Serialize)]
 pub struct DownloadState {
@@ -76,21 +79,24 @@ pub async fn download_video(
 ) -> Result<DownloadResult, String> {
     const MAX_RETRIES: u32 = 3;
     let mut current_attempt = 0;
-    
+
     loop {
         current_attempt += 1;
-        info!("Starting download attempt {} of {}", current_attempt, MAX_RETRIES);
-        
+        info!(
+            "Starting download attempt {} of {}",
+            current_attempt, MAX_RETRIES
+        );
+
         // Create progress channel for this attempt
         let (tx, mut rx) = mpsc::channel::<DownloadProgress>(32);
-        
+
         // Clone window handle for the progress monitoring task
         let progress_window = window.clone();
-        
+
         // Track if audio file is completed
         let audio_completed = Arc::new(AtomicBool::new(false));
         let audio_completed_clone = audio_completed.clone();
-        
+
         // Клонируем переменные для использования в замыкании
         let url_clone = url.clone();
         let output_path_clone = output_path.clone();
@@ -102,27 +108,30 @@ pub async fn download_video(
                 if let Err(e) = progress_window.emit("download-progress", progress.clone()) {
                     error!("Failed to emit progress: {}", e);
                 }
-                
+
                 // Check if audio download is complete
-                if progress.component == "audio" && progress.progress >= 99.0 && 
-                   !audio_completed_clone.load(Ordering::Relaxed) {
-                    
+                if progress.component == "audio"
+                    && progress.progress >= 99.0
+                    && !audio_completed_clone.load(Ordering::Relaxed)
+                {
                     // Mark as completed to avoid duplicate events
                     audio_completed_clone.store(true, Ordering::Relaxed);
-                    
+
                     let event_window = progress_window.clone();
                     let url_event = url_clone.clone();
                     let output_path_event = output_path_clone.clone();
-                    
+
                     tokio::spawn(async move {
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                        
+
                         if let Ok(info) = youtube::get_video_info(&url_event).await {
                             let output_dir = PathBuf::from(&output_path_event);
                             let safe_title = sanitize_filename(&info.title);
                             let audio_path = output_dir.join(format!("{}_audio.m4a", safe_title));
-                            
-                            if let Err(e) = event_window.emit("audio-ready", audio_path.to_string_lossy().to_string()) {
+
+                            if let Err(e) = event_window
+                                .emit("audio-ready", audio_path.to_string_lossy().to_string())
+                            {
                                 error!("Failed to emit audio-ready event: {}", e);
                             }
                         }
@@ -138,31 +147,40 @@ pub async fn download_video(
                 // Verify downloaded files
                 let video_exists = tokio::fs::metadata(&result.video_path).await.is_ok();
                 let audio_exists = tokio::fs::metadata(&result.audio_path).await.is_ok();
-                
+
                 if !video_exists || !audio_exists {
                     error!("Download verification failed:");
                     error!("  Video file exists: {}", video_exists);
                     error!("  Audio file exists: {}", audio_exists);
-                    
+
                     if current_attempt < MAX_RETRIES {
                         warn!("Retrying download...");
                         // Небольшая пауза перед следующей попыткой
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                         continue;
                     } else {
-                        return Err(format!("Failed to download after {} attempts. Files missing.", MAX_RETRIES));
+                        return Err(format!(
+                            "Failed to download after {} attempts. Files missing.",
+                            MAX_RETRIES
+                        ));
                     }
                 }
-                
+
                 // Check file sizes
-                let video_size = tokio::fs::metadata(&result.video_path).await.map(|m| m.len()).unwrap_or(0);
-                let audio_size = tokio::fs::metadata(&result.audio_path).await.map(|m| m.len()).unwrap_or(0);
-                
+                let video_size = tokio::fs::metadata(&result.video_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                let audio_size = tokio::fs::metadata(&result.audio_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+
                 if video_size == 0 || audio_size == 0 {
                     error!("Downloaded files are empty:");
                     error!("  Video size: {} bytes", video_size);
                     error!("  Audio size: {} bytes", audio_size);
-                    
+
                     if current_attempt < MAX_RETRIES {
                         warn!("Retrying download...");
                         // Удаляем пустые файлы перед повторной попыткой
@@ -175,23 +193,37 @@ pub async fn download_video(
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                         continue;
                     } else {
-                        return Err(format!("Failed to download after {} attempts. Files are empty.", MAX_RETRIES));
+                        return Err(format!(
+                            "Failed to download after {} attempts. Files are empty.",
+                            MAX_RETRIES
+                        ));
                     }
                 }
-                
-                info!("Download completed successfully on attempt {}", current_attempt);
-                info!("  Video path: {} ({} bytes)", result.video_path.display(), video_size);
-                info!("  Audio path: {} ({} bytes)", result.audio_path.display(), audio_size);
-                
+
+                info!(
+                    "Download completed successfully on attempt {}",
+                    current_attempt
+                );
+                info!(
+                    "  Video path: {} ({} bytes)",
+                    result.video_path.display(),
+                    video_size
+                );
+                info!(
+                    "  Audio path: {} ({} bytes)",
+                    result.audio_path.display(),
+                    audio_size
+                );
+
                 // Wait for progress monitoring to complete
                 let _ = progress_handle.await;
-                
+
                 // Создаем результат для возврата
                 let download_result = DownloadResult {
                     video_path: result.video_path.to_string_lossy().to_string(),
                     audio_path: result.audio_path.to_string_lossy().to_string(),
                 };
-                
+
                 // Отправляем событие download-complete с результатом
                 if let Err(e) = window.emit("download-complete", download_result.clone()) {
                     error!("Failed to emit download-complete event: {}", e);
@@ -201,13 +233,16 @@ pub async fn download_video(
             }
             Err(e) => {
                 error!("Download attempt {} failed: {}", current_attempt, e);
-                
+
                 if current_attempt < MAX_RETRIES {
                     warn!("Retrying download...");
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     continue;
                 } else {
-                    return Err(format!("Failed to download after {} attempts: {}", MAX_RETRIES, e));
+                    return Err(format!(
+                        "Failed to download after {} attempts: {}",
+                        MAX_RETRIES, e
+                    ));
                 }
             }
         }
@@ -246,18 +281,13 @@ pub async fn transcribe_audio(
     // Start transcription
     let audio_file = PathBuf::from(audio_path);
     let output_dir = PathBuf::from(output_path);
-    
-    let result_path = transcribe::transcribe_audio(
-        &audio_file,
-        &output_dir,
-        &api_key,
-        language,
-        Some(tx),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
 
-    // Подождем завершения задачи мониторинга (она должна завершиться 
+    let result_path =
+        transcribe::transcribe_audio(&audio_file, &output_dir, &api_key, language, Some(tx))
+            .await
+            .map_err(|e| e.to_string())?;
+
+    // Подождем завершения задачи мониторинга (она должна завершиться
     // после закрытия канала tx при завершении transcribe_audio)
     let _ = monitoring_task.await;
 
@@ -309,7 +339,7 @@ pub async fn translate_vtt(
     // Start translation
     let vtt_file = PathBuf::from(vtt_path);
     let output_dir = PathBuf::from(output_path);
-    
+
     let result_path = translate::translate_vtt(
         &vtt_file,
         &output_dir,
@@ -325,7 +355,8 @@ pub async fn translate_vtt(
     let _ = monitoring_task.await;
 
     // Extract the base filename for use in generate_speech
-    let filename = vtt_file.file_stem()
+    let filename = vtt_file
+        .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
 
@@ -367,7 +398,7 @@ pub async fn generate_speech(
     // Start TTS generation
     let vtt_file = PathBuf::from(vtt_path);
     let output_dir = PathBuf::from(output_path);
-    
+
     let result_path = tts::generate_tts(
         &vtt_file,
         &output_dir,
@@ -399,6 +430,8 @@ pub async fn merge_media(
     original_vtt_path: String,
     translated_vtt_path: String,
     output_path: String,
+    source_language_code: String, // Add this parameter
+    target_language_code: String, // Add this parameter
     window: tauri::Window,
 ) -> Result<MergeResult, String> {
     log::info!("=== MERGE_MEDIA COMMAND STARTED ===");
@@ -418,35 +451,63 @@ pub async fn merge_media(
     let translated_vtt_file = PathBuf::from(&translated_vtt_path);
 
     if !video_file.exists() {
+        log::error!("Validation failed: Video file not found: {}", video_path);
         return Err(format!("Video file not found: {}", video_path));
     }
     if !translated_audio_file.exists() {
-        return Err(format!("Translated audio file not found: {}", translated_audio_path));
+        log::error!(
+            "Validation failed: Translated audio file not found: {}",
+            translated_audio_path
+        );
+        return Err(format!(
+            "Translated audio file not found: {}",
+            translated_audio_path
+        ));
     }
     if !original_audio_file.exists() {
-        return Err(format!("Original audio file not found: {}", original_audio_path));
+        log::error!(
+            "Validation failed: Original audio file not found: {}",
+            original_audio_path
+        );
+        return Err(format!(
+            "Original audio file not found: {}",
+            original_audio_path
+        ));
     }
     if !original_vtt_file.exists() {
-        return Err(format!("Original VTT file not found: {}", original_vtt_path));
+        log::error!(
+            "Validation failed: Original VTT file not found: {}",
+            original_vtt_path
+        );
+        return Err(format!(
+            "Original VTT file not found: {}",
+            original_vtt_path
+        ));
     }
     if !translated_vtt_file.exists() {
-        return Err(format!("Translated VTT file not found: {}", translated_vtt_path));
+        log::error!(
+            "Validation failed: Translated VTT file not found: {}",
+            translated_vtt_path
+        );
+        return Err(format!(
+            "Translated VTT file not found: {}",
+            translated_vtt_path
+        ));
     }
 
-    // Create progress channel
+    // Создаем канал для мониторинга прогресса
     let (tx, mut rx) = mpsc::channel::<merge::MergeProgress>(32);
-
-    // Clone window handle for the progress monitoring task
     let progress_window = window.clone();
 
-    // Spawn progress monitoring task
+    // Мониторинг задачи с подробным логированием прогресса
     let monitoring_task = tokio::spawn(async move {
         log::info!("Merge progress monitoring task started");
         while let Some(progress) = rx.recv().await {
-            log::info!("Received merge progress: status={}, progress={:.1}%", 
-                      progress.status, progress.progress);
-            
-            // Emit progress event to frontend
+            log::info!(
+                "Merge progress: status={}, progress={:.1}%",
+                progress.status,
+                progress.progress
+            );
             if let Err(e) = progress_window.emit("merge-progress", progress) {
                 log::error!("Failed to emit merge progress: {}", e);
             }
@@ -454,14 +515,25 @@ pub async fn merge_media(
         log::info!("Merge progress monitoring task completed");
     });
 
-    // Start merge process
+    // Определяем директорию для вывода по output_path
+    let output_dir = PathBuf::from(&output_path);
+
+    log::info!("Output directory determined: {}", output_dir.display());
+
+    // Дополнительное логирование: проверяем, существует ли выходная директория
+    if !output_dir.exists() {
+        log::warn!(
+            "Output directory does not exist. Attempting to create: {}",
+            output_dir.display()
+        );
+        if let Err(e) = tokio::fs::create_dir_all(&output_dir).await {
+            log::error!("Failed to create output directory: {}", e);
+            return Err(format!("Failed to create output directory: {}", e));
+        }
+    }
+
     log::info!("Calling merge::merge_files...");
-    
-    // Get output directory from output_path
-    let output_dir = PathBuf::from(&output_path).parent()
-        .ok_or_else(|| "Invalid output path: cannot determine parent directory".to_string())?
-        .to_path_buf();
-    
+    // Запускаем процесс объединения
     let result = match merge::merge_files(
         &video_file,
         &translated_audio_file,
@@ -469,20 +541,38 @@ pub async fn merge_media(
         &original_vtt_file,
         &translated_vtt_file,
         &output_dir,
+        &source_language_code, // Pass source language code
+        &target_language_code, // Pass target language code
         Some(tx),
-    ).await {
+    )
+    .await
+    {
         Ok(result_path) => {
-            log::info!("Merge completed successfully");
-            log::info!("  Output path: {}", result_path.display());
-            
-            // Wait for monitoring task to complete
+            log::info!(
+                "Merge completed successfully. Output path: {}",
+                result_path.display()
+            );
+            // Дополнительная проверка: существует ли результат и не пустой ли файл
+            match tokio::fs::metadata(&result_path).await {
+                Ok(metadata) => {
+                    if (metadata.len() == 0) {
+                        log::error!("Merged file is empty: {}", result_path.display());
+                        return Err("Merged file is empty".to_string());
+                    } else {
+                        log::info!("Merged file size: {} bytes", metadata.len());
+                    }
+                }
+                Err(e) => {
+                    log::error!("Unable to get metadata for merged file: {}", e);
+                    return Err(format!("Unable to verify merged file: {}", e));
+                }
+            }
+            // Ожидаем завершения мониторинга прогресса
             let _ = monitoring_task.await;
-            
-            // Emit merge-complete event only on success
+            // Отправляем событие merge-complete при успехе
             if let Err(e) = window.emit("merge-complete", true) {
                 log::error!("Failed to emit merge-complete event: {}", e);
             }
-            
             Ok(MergeResult {
                 output_path: result_path.to_string_lossy().to_string(),
                 output_dir: output_dir.to_string_lossy().to_string(),
@@ -514,7 +604,10 @@ pub async fn process_video(
     info!("Parameters:");
     info!("  URL: {}", url);
     info!("  Output Path: {}", output_path);
-    info!("  Target Language: {} ({})", target_language_name, target_language);
+    info!(
+        "  Target Language: {} ({})",
+        target_language_name, target_language
+    );
     info!("  Voice: {}", voice);
     info!("  Model: {}", model);
     info!("  Words per second: {}", words_per_second);
@@ -523,18 +616,19 @@ pub async fn process_video(
 
     // Step 1: Download video
     info!("Step 1: Downloading video");
-    let download_result = match download_video(url.clone(), output_path.clone(), window.clone()).await {
-        Ok(result) => {
-            info!("Download completed successfully");
-            info!("  Video path: {}", result.video_path);
-            info!("  Audio path: {}", result.audio_path);
-            result
-        }
-        Err(e) => {
-            error!("Download failed: {}", e);
-            return Err(format!("Download failed: {}", e));
-        }
-    };
+    let download_result =
+        match download_video(url.clone(), output_path.clone(), window.clone()).await {
+            Ok(result) => {
+                info!("Download completed successfully");
+                info!("  Video path: {}", result.video_path);
+                info!("  Audio path: {}", result.audio_path);
+                result
+            }
+            Err(e) => {
+                error!("Download failed: {}", e);
+                return Err(format!("Download failed: {}", e));
+            }
+        };
 
     // Step 2: Transcribe audio
     info!("Step 2: Transcribing audio");
@@ -542,9 +636,11 @@ pub async fn process_video(
         download_result.audio_path.clone(),
         output_path.clone(),
         api_key.clone(),
-        None,  // language - auto detect
+        None, // language - auto detect
         window.clone(),
-    ).await {
+    )
+    .await
+    {
         Ok(result) => {
             info!("Transcription completed successfully");
             info!("  VTT path: {}", result.vtt_path);
@@ -561,12 +657,14 @@ pub async fn process_video(
     let translation_result = match translate_vtt(
         transcription_result.vtt_path.clone(),
         output_path.clone(),
-        "auto".to_string(),  // source language - auto detect
+        "auto".to_string(),           // source language - auto detect
         target_language_name.clone(), // target language name
         target_language.clone(),      // target language code
         api_key.clone(),
         window.clone(),
-    ).await {
+    )
+    .await
+    {
         Ok(result) => {
             info!("Translation completed successfully");
             info!("  Translated VTT path: {}", result.translated_vtt_path);
@@ -578,9 +676,9 @@ pub async fn process_video(
         }
     };
 
-    // Step 4: Generate TTS
+    // Updated Step 4: Generate TTS
     info!("Step 4: Generating speech");
-    let tts_result = match generate_speech(
+    let tts_result = generate_speech(
         translation_result.translated_vtt_path.clone(),
         output_path.clone(),
         api_key.clone(),
@@ -590,17 +688,14 @@ pub async fn process_video(
         translation_result.base_filename.clone(),
         target_language.clone(),
         window.clone(),
-    ).await {
-        Ok(result) => {
-            info!("TTS generation completed successfully");
-            info!("  TTS audio path: {}", result.audio_path);
-            result
-        }
-        Err(e) => {
-            error!("TTS generation failed: {}", e);
-            return Err(format!("TTS generation failed: {}", e));
-        }
-    };
+    )
+    .await
+    .map_err(|e| {
+        error!("TTS generation failed: {}", e);
+        format!("TTS generation failed: {}", e)
+    })?;
+    info!("TTS generation completed successfully");
+    info!("  TTS audio path: {}", tts_result.audio_path);
 
     // Step 5: Final merge
     info!("Step 5: Merging final video");
@@ -611,8 +706,12 @@ pub async fn process_video(
         transcription_result.vtt_path.clone(),
         translation_result.translated_vtt_path.clone(),
         output_path.clone(),
+        "auto".to_string(),      // source language code - auto detect
+        target_language.clone(), // target language code
         window.clone(),
-    ).await {
+    )
+    .await
+    {
         Ok(result) => {
             info!("Merge completed successfully");
             info!("  Final output path: {}", result.output_path);

@@ -148,13 +148,15 @@ const handleTTSProgress = (progress: any) => {
   ttsProgress.value = progress
 }
 
-const handleTTSComplete = (result: TTSResult) => {
-  ttsProgress.value = { status: 'Complete', progress: 100 }
-  // Removing automatic merge trigger from TTS completion
-  // The merge will be handled by handleProcessClick after process_video completes
+const handleTTSComplete = (ttsResult: TTSResult) => {
+  console.log('TTS complete, starting merge process', ttsResult)
+  startMergeProcess(ttsResult)
 }
 
 const startMergeProcess = async (ttsResult: TTSResult) => {
+  // Emit event to notify that merge is starting
+  window.emit('merge-start', {});
+  
   if (!downloadResult.value) {
     console.error('Download result is missing, cannot start merge')
     return
@@ -166,15 +168,14 @@ const startMergeProcess = async (ttsResult: TTSResult) => {
   }
 
   try {
+    // Set up a single listener for progress updates
     const unlistenMergeProgress = await listen('merge-progress', (event) => {
       handleMergeProgress(event.payload)
     })
-
-    const unlistenMergeComplete = await listen('merge-complete', () => {
-      unlistenMergeProgress()
-      handleMergeComplete()
-    })
-
+    
+    // Don't set up another merge-complete listener here
+    // Let VideoPreview handle the complete event
+    
     await invoke<MergeResult>('merge_media', {
       videoPath: downloadResult.value.video_path,
       translatedAudioPath: ttsResult.audio_path,
@@ -183,6 +184,9 @@ const startMergeProcess = async (ttsResult: TTSResult) => {
       translatedVttPath: translationResult.value?.translated_vtt_path,
       outputPath: selectedPath.value
     })
+    
+    // Clean up the progress listener when done
+    setTimeout(() => unlistenMergeProgress(), 2000);
   } catch (e) {
     console.error('Failed to merge media:', e)
     handleDownloadError(e instanceof Error ? e.message : 'Failed to merge media')
@@ -583,4 +587,4 @@ main {
     font-size: 1rem;
   }
 }
-</style> 
+</style>

@@ -1,13 +1,13 @@
-use log::LevelFilter;
 use env_logger::{Builder, Env};
+use log::LevelFilter;
 use std::io::Write;
 
 pub fn init_logger() {
     // Установка базового фильтра и переопределение через переменные окружения
-    let env = Env::default().filter_or("RUST_LOG", "warn,yt_translator=info");
-    
+    let env = Env::default().filter_or("RUST_LOG", "warn,videonova=info");
+
     let mut builder = Builder::from_env(env);
-    
+
     // Явно подавляем логи от определенных модулей
     builder
         .filter_module("wry", LevelFilter::Error)
@@ -31,4 +31,4 @@ pub fn init_logger() {
         })
         .target(env_logger::Target::Stderr) // Вывод в stderr для совместимости с консолью Tauri
         .init();
-} 
+}

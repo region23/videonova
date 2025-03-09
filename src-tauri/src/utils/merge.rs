@@ -1,18 +1,18 @@
-use log::{debug, info, error, warn};
+use crate::utils::common::check_file_exists_and_valid;
+use anyhow::{Result, anyhow};
+use log::{debug, error, info, warn};
+use serde::{Deserialize, Serialize};
+use std::error::Error as StdError;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
-use tokio::process::{Command as TokioCommand};
-use tokio::sync::mpsc;
-use std::time::{Instant, Duration};
-use tokio::time::{timeout, sleep};
-use which;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use std::error::Error as StdError;
-use crate::utils::common::check_file_exists_and_valid;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
+use tokio::process::Command as TokioCommand;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+use tokio::time::{sleep, timeout};
+use which;
 
 /// Structure for holding merge progress information
 #[derive(Clone, Serialize, Deserialize)]
@@ -32,10 +32,10 @@ struct FfmpegMonitor {
 async fn monitor_ffmpeg_process(pid: u32, monitor: Arc<Mutex<FfmpegMonitor>>) {
     let start_time = Instant::now();
     let monitor_interval = Duration::from_secs(5); // Check every 5 seconds
-    
+
     loop {
         sleep(monitor_interval).await;
-        
+
         // Check if process is still running
         #[cfg(target_family = "unix")]
         let process_exists = std::process::Command::new("ps")
@@ -43,7 +43,7 @@ async fn monitor_ffmpeg_process(pid: u32, monitor: Arc<Mutex<FfmpegMonitor>>) {
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false);
-            
+
         #[cfg(target_family = "windows")]
         let process_exists = std::process::Command::new("tasklist")
             .args(["/FI", &format!("PID eq {}", pid)])
@@ -53,25 +53,32 @@ async fn monitor_ffmpeg_process(pid: u32, monitor: Arc<Mutex<FfmpegMonitor>>) {
                 output_str.contains(&pid.to_string())
             })
             .unwrap_or(false);
-        
+
         if !process_exists {
-            info!("ffmpeg process {} no longer exists, monitoring stopped", pid);
+            info!(
+                "ffmpeg process {} no longer exists, monitoring stopped",
+                pid
+            );
             break;
         }
-        
+
         let mut is_stuck = false;
-        
+
         // Get process stats
         #[cfg(target_family = "unix")]
         {
             if let Ok(output) = std::process::Command::new("ps")
                 .args(["-o", "%cpu,%mem", "-p", &pid.to_string()])
-                .output() 
+                .output()
             {
                 let output_str = String::from_utf8_lossy(&output.stdout);
-                info!("ffmpeg (PID: {}) running for {:?}: {}", 
-                      pid, start_time.elapsed(), output_str.trim());
-                
+                info!(
+                    "ffmpeg (PID: {}) running for {:?}: {}",
+                    pid,
+                    start_time.elapsed(),
+                    output_str.trim()
+                );
+
                 // Parse the CPU usage
                 let lines: Vec<&str> = output_str.lines().collect();
                 if lines.len() >= 2 {
@@ -79,7 +86,10 @@ async fn monitor_ffmpeg_process(pid: u32, monitor: Arc<Mutex<FfmpegMonitor>>) {
                     if let Some(cpu_str) = stats.split_whitespace().next() {
                         if let Ok(cpu) = cpu_str.trim().parse::<f32>() {
                             if cpu < 0.5 {
-                                warn!("ffmpeg process has very low CPU usage ({}%), possibly stuck", cpu);
+                                warn!(
+                                    "ffmpeg process has very low CPU usage ({}%), possibly stuck",
+                                    cpu
+                                );
                                 is_stuck = true;
                             }
                         }
@@ -87,72 +97,88 @@ async fn monitor_ffmpeg_process(pid: u32, monitor: Arc<Mutex<FfmpegMonitor>>) {
                 }
             }
         }
-        
+
         #[cfg(target_family = "windows")]
         {
             if let Ok(output) = std::process::Command::new("wmic")
-                .args(["process", "where", &format!("ProcessId={}", pid), "get", "PercentProcessorTime"])
+                .args([
+                    "process",
+                    "where",
+                    &format!("ProcessId={}", pid),
+                    "get",
+                    "PercentProcessorTime",
+                ])
                 .output()
             {
                 let output_str = String::from_utf8_lossy(&output.stdout);
-                info!("ffmpeg (PID: {}) running for {:?}: {}", 
-                      pid, start_time.elapsed(), output_str.trim());
-                
+                info!(
+                    "ffmpeg (PID: {}) running for {:?}: {}",
+                    pid,
+                    start_time.elapsed(),
+                    output_str.trim()
+                );
+
                 // Parse CPU usage for Windows
                 let lines: Vec<&str> = output_str.lines().collect();
                 if lines.len() >= 2 {
                     let cpu_str = lines[1].trim();
                     if let Ok(cpu) = cpu_str.parse::<u32>() {
                         if cpu < 1 {
-                            warn!("ffmpeg process has very low CPU usage ({}%), possibly stuck", cpu);
+                            warn!(
+                                "ffmpeg process has very low CPU usage ({}%), possibly stuck",
+                                cpu
+                            );
                             is_stuck = true;
                         }
                     }
                 }
             }
         }
-        
+
         // Update the monitor
         let mut monitor_guard = monitor.lock().await;
-        
+
         // Check if there's been no activity for a while
         let elapsed = monitor_guard.last_activity.elapsed();
         if elapsed > Duration::from_secs(60) {
-            warn!("No activity from ffmpeg for {} seconds, marking as stuck", elapsed.as_secs());
+            warn!(
+                "No activity from ffmpeg for {} seconds, marking as stuck",
+                elapsed.as_secs()
+            );
             is_stuck = true;
         }
-        
+
         if is_stuck {
             monitor_guard.is_stuck = true;
-            
+
             // If process is stuck for more than 2 minutes, kill it
             if start_time.elapsed() > Duration::from_secs(120) && monitor_guard.is_stuck {
                 error!("ffmpeg process appears to be stuck for more than 2 minutes, killing it");
-                
+
                 #[cfg(target_family = "unix")]
                 {
                     if let Err(e) = std::process::Command::new("kill")
                         .args(["-9", &pid.to_string()])
-                        .output() 
+                        .output()
                     {
                         error!("Failed to kill stuck ffmpeg process: {}", e);
                     } else {
                         info!("Successfully killed stuck ffmpeg process {}", pid);
                     }
                 }
-                
+
                 #[cfg(target_family = "windows")]
                 {
                     if let Err(e) = std::process::Command::new("taskkill")
                         .args(["/F", "/PID", &pid.to_string()])
-                        .output() 
+                        .output()
                     {
                         error!("Failed to kill stuck ffmpeg process: {}", e);
                     } else {
                         info!("Successfully killed stuck ffmpeg process {}", pid);
                     }
                 }
-                
+
                 break;
             }
         } else {
@@ -171,6 +197,8 @@ pub async fn merge_files(
     original_vtt_path: &Path,
     translated_vtt_path: &Path,
     output_dir: &Path,
+    source_language_code: &str, // Add source language parameter
+    target_language_code: &str, // Add target language parameter
     progress_tx: Option<mpsc::Sender<MergeProgress>>,
 ) -> Result<PathBuf, Box<dyn StdError + Send + Sync>> {
     log::info!("=== MERGE_FILES FUNCTION CALLED ===");
@@ -188,7 +216,7 @@ pub async fn merge_files(
         .ok_or("Invalid video filename")?
         .to_str()
         .ok_or("Invalid video filename encoding")?;
-    
+
     let output_path = output_dir.join(format!("{}_final.mp4", video_stem));
     log::info!("Output path will be: {}", output_path.display());
 
@@ -197,7 +225,8 @@ pub async fn merge_files(
         tx.send(MergeProgress {
             status: "Starting merge process".to_string(),
             progress: 0.0,
-        }).await?;
+        })
+        .await?;
     }
 
     // Convert VTT to ASS format for ffmpeg
@@ -209,14 +238,16 @@ pub async fn merge_files(
         tx.send(MergeProgress {
             status: "Converting subtitles".to_string(),
             progress: 10.0,
-        }).await?;
+        })
+        .await?;
     }
 
     let mut cmd = TokioCommand::new("ffmpeg");
     cmd.arg("-y")
-       .arg("-i").arg(original_vtt_path)
-       .arg(&original_ass);
-    
+        .arg("-i")
+        .arg(original_vtt_path)
+        .arg(&original_ass);
+
     let output = cmd.output().await?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -226,9 +257,10 @@ pub async fn merge_files(
     // Convert translated VTT to ASS
     let mut cmd = TokioCommand::new("ffmpeg");
     cmd.arg("-y")
-       .arg("-i").arg(translated_vtt_path)
-       .arg(&translated_ass);
-    
+        .arg("-i")
+        .arg(translated_vtt_path)
+        .arg(&translated_ass);
+
     let output = cmd.output().await?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -239,37 +271,61 @@ pub async fn merge_files(
         tx.send(MergeProgress {
             status: "Merging video and audio".to_string(),
             progress: 20.0,
-        }).await?;
+        })
+        .await?;
     }
 
     // Prepare final merge command
     let mut cmd = TokioCommand::new("ffmpeg");
     cmd.arg("-y") // Overwrite output file if it exists
-        .arg("-i").arg(video_path)
-        .arg("-i").arg(translated_audio_path)
-        .arg("-i").arg(original_audio_path)
-        .arg("-i").arg(&original_ass)
-        .arg("-i").arg(&translated_ass)
-        .arg("-map").arg("0:v") // Take video from first input
-        .arg("-map").arg("1:a") // Take translated audio from second input
-        .arg("-map").arg("2:a") // Take original audio from third input
-        .arg("-map").arg("3") // Original subtitles
-        .arg("-map").arg("4") // Translated subtitles
-        .arg("-c:v").arg("copy") // Copy video codec
-        .arg("-c:a").arg("aac") // Use AAC for audio
-        .arg("-c:s").arg("mov_text") // Use mov_text codec for subtitles
-        .arg("-filter_complex").arg("[1:a]volume=1[ta];[2:a]volume=0.3[oa];[ta][oa]amix=inputs=2[a]")
-        .arg("-map").arg("[a]")
-        .arg("-metadata:s:s:0").arg("language=eng")
-        .arg("-metadata:s:s:1").arg("language=rus")
+        .arg("-i")
+        .arg(video_path)
+        .arg("-i")
+        .arg(translated_audio_path)
+        .arg("-i")
+        .arg(original_audio_path)
+        .arg("-i")
+        .arg(&original_ass)
+        .arg("-i")
+        .arg(&translated_ass)
+        .arg("-map")
+        .arg("0:v") // Take video from first input
+        .arg("-map")
+        .arg("1:a") // Take translated audio from second input
+        .arg("-map")
+        .arg("2:a") // Take original audio from third input
+        .arg("-map")
+        .arg("3") // Original subtitles
+        .arg("-map")
+        .arg("4") // Translated subtitles
+        .arg("-c:v")
+        .arg("libx264") // Force encoding to h.264 for QuickTime compatibility
+        .arg("-pix_fmt")
+        .arg("yuv420p") // Ensure pixel format compatibility
+        .arg("-profile:v")
+        .arg("high")
+        .arg("-level")
+        .arg("4.1")
+        .arg("-c:a")
+        .arg("aac") // Use AAC for audio
+        .arg("-b:a")
+        .arg("192k")
+        .arg("-c:s")
+        .arg("mov_text") // Use mov_text codec for subtitles
+        .arg("-filter_complex")
+        .arg("[1:a]volume=1[ta];[2:a]volume=0.3[oa];[ta][oa]amix=inputs=2:normalize=0[a]")
+        .arg("-map")
+        .arg("[a]")
+        .arg("-metadata:s:s:0")
+        .arg(format!("language={}", source_language_code))
+        .arg("-metadata:s:s:1")
+        .arg(format!("language={}", target_language_code))
         .arg(&output_path);
 
     log::info!("Executing ffmpeg command: {:?}", cmd);
 
     // Execute ffmpeg with progress monitoring
-    let mut child = cmd.stdout(Stdio::piped())
-                      .stderr(Stdio::piped())
-                      .spawn()?;
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
 
     // Monitor progress
     let pid = child.id().ok_or("Failed to get process ID")?;
@@ -316,8 +372,9 @@ pub async fn merge_files(
         tx.send(MergeProgress {
             status: "Merge complete".to_string(),
             progress: 100.0,
-        }).await?;
+        })
+        .await?;
     }
 
     Ok(output_path)
-} 
+}
