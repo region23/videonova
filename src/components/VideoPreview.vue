@@ -651,6 +651,11 @@ onMounted(async () => {
   const unlistenMergeStart = await listen('merge-start', () => {
     console.log('Merge start event received');
     isMerging.value = true;
+    currentStep.value = 'merge'; // Explicitly set the current step
+    
+    // Show the merge UI
+    ttsStepComplete.value = true;
+    trackUIBlocking('Merge start received');
   });
 
   onUnmounted(() => {

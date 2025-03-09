@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { listen } from '@tauri-apps/api/event'
+import { listen, emit } from '@tauri-apps/api/event'  // Add 'emit' here
 import { invoke } from '@tauri-apps/api/core'
 import { Store as TauriStore } from '@tauri-apps/plugin-store'
 import YouTubeInput from './YouTubeInput.vue'
@@ -154,42 +154,46 @@ const handleTTSComplete = (ttsResult: TTSResult) => {
 }
 
 const startMergeProcess = async (ttsResult: TTSResult) => {
-  // Emit event to notify that merge is starting
-  window.emit('merge-start', {});
-  
-  if (!downloadResult.value) {
-    console.error('Download result is missing, cannot start merge')
-    return
-  }
-
-  if (!transcriptionResult.value || !translationResult.value) {
-    console.error('Transcription or translation results are missing, cannot start merge')
-    return
-  }
-
+  // Use the imported emit function instead of window.emit
   try {
-    // Set up a single listener for progress updates
-    const unlistenMergeProgress = await listen('merge-progress', (event) => {
-      handleMergeProgress(event.payload)
-    })
+    await emit('merge-start', {});
     
-    // Don't set up another merge-complete listener here
-    // Let VideoPreview handle the complete event
-    
-    await invoke<MergeResult>('merge_media', {
-      videoPath: downloadResult.value.video_path,
-      translatedAudioPath: ttsResult.audio_path,
-      originalAudioPath: downloadResult.value.audio_path,
-      originalVttPath: transcriptionResult.value?.vtt_path,
-      translatedVttPath: translationResult.value?.translated_vtt_path,
-      outputPath: selectedPath.value
-    })
-    
-    // Clean up the progress listener when done
-    setTimeout(() => unlistenMergeProgress(), 2000);
+    if (!downloadResult.value) {
+      console.error('Download result is missing, cannot start merge')
+      return
+    }
+
+    if (!transcriptionResult.value || !translationResult.value) {
+      console.error('Transcription or translation results are missing, cannot start merge')
+      return
+    }
+
+    try {
+      // Set up a single listener for progress updates
+      const unlistenMergeProgress = await listen('merge-progress', (event) => {
+        handleMergeProgress(event.payload)
+      })
+      
+      // Don't set up another merge-complete listener here
+      // Let VideoPreview handle the complete event
+      
+      await invoke<MergeResult>('merge_media', {
+        videoPath: downloadResult.value.video_path,
+        translatedAudioPath: ttsResult.audio_path,
+        originalAudioPath: downloadResult.value.audio_path,
+        originalVttPath: transcriptionResult.value?.vtt_path,
+        translatedVttPath: translationResult.value?.translated_vtt_path,
+        outputPath: selectedPath.value
+      })
+      
+      // Clean up the progress listener when done
+      setTimeout(() => unlistenMergeProgress(), 2000);
+    } catch (e) {
+      console.error('Failed to merge media:', e)
+      handleDownloadError(e instanceof Error ? e.message : 'Failed to merge media')
+    }
   } catch (e) {
-    console.error('Failed to merge media:', e)
-    handleDownloadError(e instanceof Error ? e.message : 'Failed to merge media')
+    console.error('Failed to emit merge-start event:', e)
   }
 }
 
