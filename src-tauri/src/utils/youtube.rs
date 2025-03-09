@@ -209,6 +209,17 @@ pub async fn download_video(
     let audio_path = audio_result?;
     let video_path = video_result?;
 
+    // Verify downloaded files
+    let video_exists = check_file_exists_and_valid(&video_path).await;
+    let audio_exists = check_file_exists_and_valid(&audio_path).await;
+
+    if !video_exists || !audio_exists {
+        error!("Download verification failed:");
+        error!("  Video file exists and valid: {}", video_exists);
+        error!("  Audio file exists and valid: {}", audio_exists);
+        return Err(anyhow!("Downloaded files are missing or empty"));
+    }
+
     info!("Download completed successfully");
     debug!("Audio file: {}", audio_path.display());
     debug!("Video file: {}", video_path.display());

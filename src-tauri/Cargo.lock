@@ -6348,6 +6348,7 @@ dependencies = [
  "lazy_static",
  "log",
  "md5",
+ "parking_lot",
  "path-clean",
  "rand 0.8.5",
  "rayon",

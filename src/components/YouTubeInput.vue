@@ -80,32 +80,26 @@ const translatedVttPath = ref<string | null>(null)
 const ttsAudioPath = ref<string | null>(null)
 const videoPath = ref<string | null>(null)
 
-// Добавляем слушатель события download-complete
-onMounted(async () => {
-  // Слушаем события завершения загрузки видео
-  const unlistenDownloadComplete = await listen<DownloadResult>('download-complete', (event) => {
-    handleDownloadComplete(event.payload)
-  })
-  
-  // Очистка слушателя при размонтировании компонента
-  onUnmounted(() => {
-    unlistenDownloadComplete()
-  })
-})
-
 // Listen for audio-ready event and automatically start transcription
-listen('audio-ready', (event) => {
+listen('audio-ready', async (event) => {
   const path = event.payload as string
   audioPath.value = path
   
   // Вытаскиваем путь к видеофайлу из пути к аудиофайлу, если он отсутствует
-  if (!videoPath.value && downloadResult.value) {
-    // Путь к видеофайлу должен быть похож на путь к аудиофайлу,
-    // только с другим суффиксом
+  if (!videoPath.value) {
     const audioPathStr = path as string
     if (audioPathStr.endsWith('_audio.m4a')) {
       const basePathWithoutSuffix = audioPathStr.slice(0, -10) // убираем '_audio.m4a'
       videoPath.value = `${basePathWithoutSuffix}.mp4` // предполагаем, что видео в формате mp4
+      
+      // Set downloadResult if it's not already set
+      if (!downloadResult.value) {
+        downloadResult.value = {
+          video_path: videoPath.value,
+          audio_path: audioPath.value
+        }
+        console.log('Setting downloadResult from audio-ready:', downloadResult.value)
+      }
     }
   }
   
@@ -115,6 +109,12 @@ listen('audio-ready', (event) => {
   
   // Автоматически запускаем транскрибацию
   startTranscriptionWithPath(path)
+})
+
+// Move download-complete listener outside onMounted
+listen<DownloadResult>('download-complete', (event) => {
+  console.log('Download complete event received:', event.payload)
+  handleDownloadComplete(event.payload)
 })
 
 const selectFolder = async () => {
@@ -188,6 +188,7 @@ const startTranscriptionWithPath = async (path: string) => {
   if (!path) return
 
   try {
+    console.log('Starting transcription with path:', path)
     // Get OpenAI API key from store
     const store = await TauriStore.load('.settings.dat')
     const apiKey = await store.get('openai-api-key') as string
@@ -211,9 +212,14 @@ const startTranscriptionWithPath = async (path: string) => {
           language: props.sourceLanguage || ''
         })
         
+        console.log('Transcription complete, setting vttPath:', result.vtt_path)
         unlistenTranscriptionProgress()
         emit('transcription-complete', result)
         vttPath.value = result.vtt_path
+        console.log('Updated state after transcription:', {
+          vttPath: vttPath.value,
+          downloadResult: downloadResult.value
+        })
         
         // Auto-start translation if target language is set
         if (props.targetLanguage && props.targetLanguageCode) {
@@ -277,6 +283,42 @@ const startTTS = async (translatedVttPath: string) => {
       throw new Error('OpenAI API key not found')
     }
 
+    // Debug logging
+    console.log('Current state before TTS:', {
+      downloadResult: downloadResult.value,
+      vttPath: vttPath.value,
+      videoPath: videoPath.value,
+      audioPath: audioPath.value
+    })
+
+    if (!downloadResult.value || !vttPath.value) {
+      console.error('Missing required files:', {
+        hasDownloadResult: !!downloadResult.value,
+        hasVttPath: !!vttPath.value,
+        downloadResult: downloadResult.value,
+        vttPath: vttPath.value
+      })
+      throw new Error('Missing required video or transcription files')
+    }
+
+    // Validate file paths
+    const videoExists = await invoke('check_file_exists_command', { path: downloadResult.value.video_path })
+    const audioExists = await invoke('check_file_exists_command', { path: downloadResult.value.audio_path })
+    const vttExists = await invoke('check_file_exists_command', { path: vttPath.value })
+
+    console.log('File existence check:', {
+      videoExists,
+      audioExists,
+      vttExists,
+      videoPath: downloadResult.value.video_path,
+      audioPath: downloadResult.value.audio_path,
+      vttPath: vttPath.value
+    })
+
+    if (!videoExists || !audioExists || !vttExists) {
+      throw new Error('One or more required files are missing on disk')
+    }
+
     // Listen for TTS progress
     const unlistenTTSProgress = await listen('tts-progress', (event) => {
       console.log('TTS progress received:', event.payload)
@@ -284,24 +326,27 @@ const startTTS = async (translatedVttPath: string) => {
     })
 
     console.log('Invoking generate_speech with parameters:', {
-      vttPath: translatedVttPath,
-      outputPath: selectedPath.value,
-      voice: 'alloy',
-      model: 'tts-1',
-      wordsPerSecond: 3.0,
-      baseFilename: translatedVttPath.split('/').pop()?.split('.')[0] || 'output',
-      languageSuffix: `_${props.targetLanguageCode}`
-    })
-
-    const result = await invoke<TTSResult>('generate_speech', {
-      vttPath: translatedVttPath,
+      videoPath: downloadResult.value.video_path,
+      audioPath: downloadResult.value.audio_path,
+      originalVttPath: vttPath.value,
+      translatedVttPath: translatedVttPath,
       outputPath: selectedPath.value,
       apiKey,
       voice: 'alloy',
       model: 'tts-1',
-      wordsPerSecond: 3.0,
-      baseFilename: translatedVttPath.split('/').pop()?.split('.')[0] || 'output',
-      languageSuffix: `_${props.targetLanguageCode}`
+      wordsPerSecond: 3.0
+    })
+
+    const result = await invoke<TTSResult>('generate_speech', {
+      videoPath: downloadResult.value.video_path,
+      audioPath: downloadResult.value.audio_path,
+      originalVttPath: vttPath.value,
+      translatedVttPath: translatedVttPath,
+      outputPath: selectedPath.value,
+      apiKey,
+      voice: 'alloy',
+      model: 'tts-1',
+      wordsPerSecond: 3.0
     })
     
     console.log('TTS generation complete, result:', result)
@@ -322,11 +367,15 @@ const startTTS = async (translatedVttPath: string) => {
 }
 
 const handleDownloadComplete = (result: DownloadResult) => {
-  console.log('Download complete, result:', result)
+  console.log('Download complete, setting downloadResult:', result)
   downloadResult.value = result
   
   // Сохраняем путь к видеофайлу
   videoPath.value = result.video_path
+  console.log('Updated state after download:', {
+    downloadResult: downloadResult.value,
+    videoPath: videoPath.value
+  })
 }
 
 // Удаляем LANGUAGE_CODES и оставляем только необходимый код

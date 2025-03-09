@@ -69,8 +69,8 @@ fn main() {
             commands::transcribe_audio,
             commands::translate_vtt,
             commands::generate_speech,
-            commands::merge_media,
             commands::process_video,
+            commands::check_file_exists_command,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

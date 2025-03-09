@@ -46,6 +46,7 @@ webrtc-vad = "0.4"
 rayon = "1.7"
 futures = "0.3"
 async-trait = "0.1"
+parking_lot = "0.12"
 
 # Утилиты
 md5 = "0.7"

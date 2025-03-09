@@ -88,10 +88,29 @@ impl TtsSync {
         // Проверяем наличие трекера прогресса
         let tracker_ref = self.progress_tracker.as_ref();
         
-        // 1. Парсинг и анализ субтитров
+        // Validate input files
+        log::info!("Validating input files");
         if let Some(t) = tracker_ref {
             t.set_step(ProcessStep::SubtitleParsing);
-            t.update_step_progress(0.0, Some("Начало парсинга субтитров".to_string()));
+            t.update_step_progress(0.0, Some("Проверка входных файлов".to_string()));
+        }
+
+        for (file_path, description) in [
+            (video_path, "video"),
+            (audio_path, "audio"),
+            (original_vtt_path, "original subtitles"),
+            (translated_vtt_path, "translated subtitles"),
+        ] {
+            if !tokio::fs::metadata(file_path).await.is_ok() {
+                let error = format!("Input {} file not found: {}", description, file_path);
+                log::error!("{}", error);
+                return Err(TtsSyncError::FileNotFound(error));
+            }
+        }
+        
+        // 1. Парсинг и анализ субтитров
+        if let Some(t) = tracker_ref {
+            t.update_step_progress(10.0, Some("Начало парсинга субтитров".to_string()));
         }
         
         let original_subtitles = subtitle::parser::parse_vtt_file(original_vtt_path)
@@ -140,18 +159,16 @@ impl TtsSync {
         // 4. Генерация речи с использованием OpenAI API
         if let Some(t) = tracker_ref {
             t.set_step(ProcessStep::SpeechGeneration);
-            t.update_step_progress(0.0, Some("Начало генерации речи".to_string()));
         }
         
         let tts_audio_path = tts::openai::generate_speech_with_progress(
             &processed_subtitles,
             &self.config,
             tracker_ref,
-        ).await.map_err(|e| TtsSyncError::TtsGeneration(e.to_string()))?;
-        
-        if let Some(t) = tracker_ref {
-            t.update_step_progress(100.0, Some("Генерация речи завершена".to_string()));
-        }
+        ).await.map_err(|e| {
+            log::error!("TTS generation failed: {}", e);
+            TtsSyncError::TtsGeneration(e.to_string())
+        })?;
         
         // 5. Синхронизация аудио с видео
         if let Some(t) = tracker_ref {
@@ -166,7 +183,10 @@ impl TtsSync {
             translated_vtt_path,
             output_path,
             &self.config,
-        ).map_err(|e| TtsSyncError::Synchronization(e.to_string()))?;
+        ).map_err(|e| {
+            log::error!("Audio-video synchronization failed: {}", e);
+            TtsSyncError::Synchronization(e.to_string())
+        })?;
         
         if let Some(t) = tracker_ref {
             t.update_step_progress(100.0, Some("Синхронизация аудио с видео завершена".to_string()));
