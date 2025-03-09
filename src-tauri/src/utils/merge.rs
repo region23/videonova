@@ -199,6 +199,8 @@ pub async fn merge_files(
     output_dir: &Path,
     source_language_code: &str, // Add source language parameter
     target_language_code: &str, // Add target language parameter
+    source_language_name: &str,
+    target_language_name: &str,
     progress_tx: Option<mpsc::Sender<MergeProgress>>,
 ) -> Result<PathBuf, Box<dyn StdError + Send + Sync>> {
     log::info!("=== MERGE_FILES FUNCTION CALLED ===");
@@ -316,10 +318,23 @@ pub async fn merge_files(
         .arg("[1:a]volume=1[ta];[2:a]volume=0.3[oa];[ta][oa]amix=inputs=2:normalize=0[a]")
         .arg("-map")
         .arg("[a]")
+        // Language metadata
+        .arg("-metadata:s:a:0")
+        .arg(format!("language={}", target_language_code))
+        .arg("-metadata:s:a:0")
+        .arg(format!(
+            "title={} Audio + Original Mix",
+            target_language_name
+        ))
+        // Subtitle metadata
         .arg("-metadata:s:s:0")
         .arg(format!("language={}", source_language_code))
+        .arg("-metadata:s:s:0")
+        .arg(format!("title={} Subtitles", source_language_name))
         .arg("-metadata:s:s:1")
         .arg(format!("language={}", target_language_code))
+        .arg("-metadata:s:s:1")
+        .arg(format!("title={} Subtitles", target_language_name))
         .arg(&output_path);
 
     log::info!("Executing ffmpeg command: {:?}", cmd);

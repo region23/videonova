@@ -150,50 +150,60 @@ const handleTTSProgress = (progress: any) => {
 
 const handleTTSComplete = (ttsResult: TTSResult) => {
   console.log('TTS complete, starting merge process', ttsResult)
-  startMergeProcess(ttsResult)
+  
+  // Add logging to check what downloadResult contains
+  console.log('Current downloadResult:', downloadResult.value)
+  
+  // Extract video ID from the TTS audio path
+  const ttsPathParts = ttsResult.audio_path.split('/')
+  const ttsFileName = ttsPathParts[ttsPathParts.length - 1]
+  const baseFileName = ttsFileName.split('_')[0] // Get base name before first underscore
+  
+  console.log('Extracted base filename:', baseFileName)
+  
+  // Only start merge if we have all required files
+  if (downloadResult.value && transcriptionResult.value && translationResult.value) {
+    startMergeProcess(ttsResult)
+  } else {
+    console.error('Cannot start merge: missing required files', {
+      downloadResult: downloadResult.value,
+      transcriptionResult: transcriptionResult.value,
+      translationResult: translationResult.value
+    })
+  }
 }
 
 const startMergeProcess = async (ttsResult: TTSResult) => {
-  // Use the imported emit function instead of window.emit
   try {
-    await emit('merge-start', {});
+    await emit('merge-start', {})
     
-    if (!downloadResult.value) {
-      console.error('Download result is missing, cannot start merge')
+    if (!downloadResult.value || !transcriptionResult.value || !translationResult.value) {
+      console.error('Missing required files for merge')
       return
     }
-
-    if (!transcriptionResult.value || !translationResult.value) {
-      console.error('Transcription or translation results are missing, cannot start merge')
-      return
-    }
-
-    try {
-      // Set up a single listener for progress updates
-      const unlistenMergeProgress = await listen('merge-progress', (event) => {
-        handleMergeProgress(event.payload)
-      })
-      
-      // Don't set up another merge-complete listener here
-      // Let VideoPreview handle the complete event
-      
-      await invoke<MergeResult>('merge_media', {
-        videoPath: downloadResult.value.video_path,
-        translatedAudioPath: ttsResult.audio_path,
-        originalAudioPath: downloadResult.value.audio_path,
-        originalVttPath: transcriptionResult.value?.vtt_path,
-        translatedVttPath: translationResult.value?.translated_vtt_path,
-        outputPath: selectedPath.value
-      })
-      
-      // Clean up the progress listener when done
-      setTimeout(() => unlistenMergeProgress(), 2000);
-    } catch (e) {
-      console.error('Failed to merge media:', e)
-      handleDownloadError(e instanceof Error ? e.message : 'Failed to merge media')
-    }
+    
+    console.log('Using backend-generated paths for merge:')
+    console.log('- Video:', downloadResult.value.video_path)
+    console.log('- Original Audio:', downloadResult.value.audio_path)
+    console.log('- Translated Audio:', ttsResult.audio_path)
+    console.log('- Original VTT:', transcriptionResult.value.vtt_path)
+    console.log('- Translated VTT:', translationResult.value.translated_vtt_path)
+    
+    await invoke<MergeResult>('merge_media', {
+      videoPath: downloadResult.value.video_path,
+      translatedAudioPath: ttsResult.audio_path,
+      originalAudioPath: downloadResult.value.audio_path,
+      originalVttPath: transcriptionResult.value.vtt_path,
+      translatedVttPath: translationResult.value.translated_vtt_path,
+      outputPath: selectedPath.value,
+      sourceLanguageCode: selectedLanguages.value?.source?.code || 'auto',
+      targetLanguageCode: selectedLanguages.value?.target?.code || 'en',
+      sourceLanguageName: selectedLanguages.value?.source?.name || 'Original',
+      targetLanguageName: selectedLanguages.value?.target?.name || 'English'
+    })
   } catch (e) {
-    console.error('Failed to emit merge-start event:', e)
+    console.error('Failed to merge media:', e)
+    handleDownloadError(`Failed to merge media: ${e}`)
   }
 }
 
@@ -249,46 +259,41 @@ const handleProcessClick = async () => {
     ttsProgress.value = null
     mergeProgress.value = null
 
-    // Pre-set download result paths
-    const videoFileName = currentUrl.value.split('v=')[1].replace(/[^a-zA-Z0-9]/g, '_')
-    downloadResult.value = {
-      video_path: `${selectedPath.value}/${videoFileName}_video.mp4`,
-      audio_path: `${selectedPath.value}/${videoFileName}_audio.m4a`
-    }
-    
-    const result = await invoke<ProcessVideoResult>('process_video', {
-      url: currentUrl.value,
-      outputPath: selectedPath.value,
-      targetLanguage: selectedLanguages.value.target.code,
-      targetLanguageName: selectedLanguages.value.target.name,
-      apiKey: apiKey,
-      voice: 'alloy',
-      model: 'tts-1',
-      wordsPerSecond: 3.0
-    })
-    
-    // Set all results after process_video completes
-    downloadResult.value = {
-      video_path: result.video_path,
-      audio_path: result.audio_path
-    }
-    
-    transcriptionResult.value = {
-      vtt_path: result.transcription_path
-    }
-    
-    translationResult.value = {
-      translated_vtt_path: result.translation_path
-    }
-
-    // Start merge process with TTS result
-    if (result.tts_path) {
-      console.log('Starting merge process after video processing')
-      await startMergeProcess({ audio_path: result.tts_path })
-    } else {
-      console.error('TTS path is missing from process_video result')
-      error.value = 'Failed to get TTS audio path'
-      isProcessing.value = false
+    try {
+      const result = await invoke<ProcessVideoResult>('process_video', {
+        url: currentUrl.value,
+        outputPath: selectedPath.value,
+        targetLanguage: selectedLanguages.value.target.code,
+        targetLanguageName: selectedLanguages.value.target.name,
+        apiKey: apiKey,
+        voice: 'nova',
+        model: 'tts-1',
+        wordsPerSecond: 3.0
+        // The backend will use sanitize_filename on the video title
+      })
+      
+      // Now store exactly what the backend returns
+      downloadResult.value = {
+        video_path: result.video_path,
+        audio_path: result.audio_path
+      }
+      
+      transcriptionResult.value = {
+        vtt_path: result.transcription_path
+      }
+      
+      translationResult.value = {
+        translated_vtt_path: result.translation_path
+      }
+      
+      console.log('Video processing complete, final path:', result.final_path)
+    } catch (e) {
+      console.error('Pipeline failed:', e instanceof Error ? e.message : e)
+      handleDownloadError(e instanceof Error ? e.message : 'Failed to process video')
+      // Reset all results if process failed
+      downloadResult.value = null
+      transcriptionResult.value = null
+      translationResult.value = null
     }
 
   } catch (e) {

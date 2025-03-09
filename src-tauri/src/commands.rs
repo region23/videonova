@@ -432,6 +432,8 @@ pub async fn merge_media(
     output_path: String,
     source_language_code: String, // Add this parameter
     target_language_code: String, // Add this parameter
+    source_language_name: String,
+    target_language_name: String,
     window: tauri::Window,
 ) -> Result<MergeResult, String> {
     log::info!("=== MERGE_MEDIA COMMAND STARTED ===");
@@ -543,6 +545,8 @@ pub async fn merge_media(
         &output_dir,
         &source_language_code, // Pass source language code
         &target_language_code, // Pass target language code
+        &source_language_name,
+        &target_language_name,
         Some(tx),
     )
     .await
@@ -706,8 +710,10 @@ pub async fn process_video(
         transcription_result.vtt_path.clone(),
         translation_result.translated_vtt_path.clone(),
         output_path.clone(),
-        "auto".to_string(),      // source language code - auto detect
-        target_language.clone(), // target language code
+        "auto".to_string(),           // source_language_code
+        target_language.clone(),      // target_language_code
+        "Original".to_string(),       // source_language_name - ADD THIS
+        target_language_name.clone(), // target_language_name - ADD THIS
         window.clone(),
     )
     .await
