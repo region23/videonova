@@ -1086,10 +1086,31 @@ defineExpose({
 
     <!-- Empty state -->
     <div v-if="(!videoInfo || shouldHideVideoInfo) && !internalIsLoading && !translationComplete" class="empty-state">
-      <p class="description">
-        Translate your favorite YouTube videos into any language with AI-powered
-        voice translation
-      </p>
+      <div class="quick-start-guide">
+        <h3>Quick Start Guide</h3>
+        <div class="steps">
+          <div class="step">
+            <div class="step-number">1</div>
+            <p>Paste a YouTube video URL in the input field above</p>
+          </div>
+          <div class="step">
+            <div class="step-number">2</div>
+            <p>Select folder for output video</p>
+          </div>
+          <div class="step">
+            <div class="step-number">3</div>
+            <p>Select your desired target language for translation</p>
+          </div>
+          <div class="step">
+            <div class="step-number">4</div>
+            <p>Click "Translate" and wait while we process your video</p>
+          </div>
+          <div class="step">
+            <div class="step-number">5</div>
+            <p>Enjoy translated video saved locally!</p>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -1334,5 +1355,66 @@ defineExpose({
   100% {
     opacity: 0.7;
   }
+}
+
+.quick-start-guide {
+  margin-top: 0.5rem;
+  padding: 1.25rem;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 8px;
+  text-align: center;
+  max-width: 500px;
+  margin-left: auto;
+  margin-right: auto;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.quick-start-guide h3 {
+  font-size: 1rem;
+  margin-bottom: 1.25rem;
+  color: #545353;
+  text-align: center;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: center;
+  max-width: 400px;
+  margin: 0 auto;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.step-number {
+  width: 22px;
+  height: 22px;
+  background: rgba(59, 130, 246, 0.5);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.9);
+  flex-shrink: 0;
+  font-size: 0.85rem;
+}
+
+.step p {
+  margin: 0;
+  color: #545353;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  text-align: left;
+  font-weight: 400;
 }
 </style> 

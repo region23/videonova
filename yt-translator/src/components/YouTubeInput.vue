@@ -84,11 +84,7 @@ const videoPath = ref<string | null>(null)
 onMounted(async () => {
   // Слушаем события завершения загрузки видео
   const unlistenDownloadComplete = await listen<DownloadResult>('download-complete', (event) => {
-    downloadResult.value = event.payload
-    console.log('Download complete, result:', downloadResult.value)
-    
-    // Сохраняем путь к видеофайлу
-    videoPath.value = event.payload.video_path
+    handleDownloadComplete(event.payload)
   })
   
   // Очистка слушателя при размонтировании компонента
@@ -309,153 +305,28 @@ const startTTS = async (translatedVttPath: string) => {
     })
     
     console.log('TTS generation complete, result:', result)
+    console.log('TTS file path:', result.audio_path)
+    console.log('Checking if TTS file exists at path:', result.audio_path)
+    
     unlistenTTSProgress()
     ttsAudioPath.value = result.audio_path
 
     // Генерируем событие о завершении генерации TTS
     emit('tts-complete', result)
 
-    // Auto-start merge
-    startMerge()
+    // Removing automatic merge trigger, letting MainLayout handle it
   } catch (e) {
     console.error('Failed to generate TTS:', e)
     emit('translation-error', e instanceof Error ? e.message : 'Failed to generate TTS. Please try again.')
   }
 }
 
-// Add merge progress listener
-const startMerge = async () => {
-  console.log('=== START MERGE CALLED ===')
-  console.log('Current state:', {
-    isMerging: isMerging.value,
-    ttsAudioPath: ttsAudioPath.value,
-    vttPath: vttPath.value,
-    translatedVttPath: translatedVttPath.value,
-    downloadResult: downloadResult.value,
-    videoPath: videoPath.value,
-    audioPath: audioPath.value,
-  })
-
-  // Проверяем наличие всех необходимых файлов и собираем отладочную информацию
-  const debugInfo = {
-    ttsAudio: !!ttsAudioPath.value,
-    vtt: !!vttPath.value,
-    translatedVtt: !!translatedVttPath.value,
-    downloadResult: !!downloadResult.value,
-    videoPath: !!videoPath.value,
-    ttsAudioPath: ttsAudioPath.value,
-    vttPath: vttPath.value,
-    translatedVttPath: translatedVttPath.value,
-    videoPathValue: videoPath.value,
-    downloadResultPaths: downloadResult.value ? {
-      video: downloadResult.value.video_path,
-      audio: downloadResult.value.audio_path
-    } : null
-  }
+const handleDownloadComplete = (result: DownloadResult) => {
+  console.log('Download complete, result:', result)
+  downloadResult.value = result
   
-  console.log('Merge prerequisites debug info:', debugInfo)
-  
-  if (!ttsAudioPath.value || !vttPath.value || !translatedVttPath.value) {
-    console.error('Missing required files for merge:', debugInfo)
-    emit('merge-error', 'Missing required files for merge. Please check logs for details.')
-    return
-  }
-  
-  // Получаем путь к видеофайлу из нескольких источников
-  console.log('Determining video file path...')
-  
-  // Проверим, есть ли прямой путь от загрузки
-  let videoFilePath = downloadResult.value?.video_path
-  console.log('Video path from download result:', videoFilePath)
-  
-  // Если нет прямого пути, используем videoPath, только если он выглядит как медиафайл
-  if (!videoFilePath && videoPath.value && videoPath.value.match(/\.(mp4|mkv|webm|avi|mov)$/i)) {
-    videoFilePath = videoPath.value
-    console.log('Using videoPath variable as video path:', videoFilePath)
-  }
-  
-  // Если все еще нет пути, попробуем сформировать его из аудиопути
-  if (!videoFilePath && audioPath.value && audioPath.value.endsWith('_audio.m4a')) {
-    videoFilePath = audioPath.value.replace('_audio.m4a', '.mp4')
-    console.log('Derived video path from audio path:', videoFilePath)
-  }
-  
-  // Финальная проверка наличия видеопути
-  if (!videoFilePath) {
-    console.error('Could not determine valid video path from any source:', debugInfo)
-    emit('merge-error', 'Valid video path could not be determined. Cannot proceed with merge.')
-    return
-  }
-  
-  try {
-    console.log('Starting merge process...')
-    isMerging.value = true
-    
-    // Сохраняем правильный путь к видео для последующего использования
-    videoPath.value = videoFilePath
-    
-    // Явно показываем все пути для отладки
-    console.log('=== FINAL PATHS FOR MERGE ===')
-    console.log('Video path:', videoFilePath)
-    console.log('Translated Audio path:', ttsAudioPath.value)
-    console.log('Original Audio path:', downloadResult.value?.audio_path)
-    console.log('Original VTT path:', vttPath.value)
-    console.log('Translated VTT path:', translatedVttPath.value)
-    console.log('Output directory:', selectedPath.value)
-    
-    // Listen for merge progress
-    console.log('Setting up merge progress listener...')
-    const unlistenMergeProgress = await listen('merge-progress', (event) => {
-      console.log('Merge progress received:', event.payload)
-      emit('merge-progress', event.payload)
-    })
-    
-    // Добавляем слушатель ошибок слияния
-    console.log('Setting up merge error listener...')
-    const unlistenMergeError = await listen('merge-error', (event) => {
-      console.error('Merge error received from backend:', event.payload)
-      emit('merge-error', String(event.payload))
-    })
-    
-    console.log('Preparing to invoke merge_media...')
-    setTimeout(async () => {
-      try {
-        console.log('Invoking merge_media with paths:', {
-          videoPath: videoFilePath,
-          translatedAudioPath: ttsAudioPath.value,
-          originalAudioPath: downloadResult.value?.audio_path,
-          originalVttPath: vttPath.value,
-          translatedVttPath: translatedVttPath.value,
-          outputPath: selectedPath.value
-        })
-        
-        const result = await invoke<MergeResult>('merge_media', {
-          videoPath: videoFilePath,
-          translatedAudioPath: ttsAudioPath.value,
-          originalAudioPath: downloadResult.value?.audio_path,
-          originalVttPath: vttPath.value,
-          translatedVttPath: translatedVttPath.value,
-          outputPath: selectedPath.value,
-        })
-        
-        console.log('Merge completed successfully:', result)
-        unlistenMergeProgress()
-        unlistenMergeError()
-        
-        emit('merge-complete', result)
-      } catch (e) {
-        console.error('Failed to merge media:', e)
-        emit('merge-error', e instanceof Error ? e.message : 'Failed to merge media. Please try again.')
-        
-        // Очищаем слушателей в случае ошибки
-        unlistenMergeProgress()
-        unlistenMergeError()
-      }
-    }, 100)
-  } catch (e) {
-    console.error('Failed to initialize merge process:', e)
-    emit('merge-error', e instanceof Error ? e.message : 'Failed to initialize merge process. Please try again.')
-  }
+  // Сохраняем путь к видеофайлу
+  videoPath.value = result.video_path
 }
 
 // Удаляем LANGUAGE_CODES и оставляем только необходимый код
@@ -473,7 +344,7 @@ const normalizeLanguageCode = (code: string): string => {
           <input
             v-model="youtubeUrl"
             type="url"
-            placeholder="paste youtube videolink here..."
+            placeholder="Paste YouTube link here..."
             required
             :disabled="disabled || isLoading"
             @input="getVideoInfo"

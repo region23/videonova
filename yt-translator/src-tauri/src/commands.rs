@@ -401,13 +401,37 @@ pub async fn merge_media(
     output_path: String,
     window: tauri::Window,
 ) -> Result<MergeResult, String> {
-    log::info!("merge_media command started with params:");
+    log::info!("=== MERGE_MEDIA COMMAND STARTED ===");
+    log::info!("Input parameters received:");
     log::info!("  Video: {}", video_path);
     log::info!("  Translated Audio: {}", translated_audio_path);
     log::info!("  Original Audio: {}", original_audio_path);
     log::info!("  Original VTT: {}", original_vtt_path);
     log::info!("  Translated VTT: {}", translated_vtt_path);
     log::info!("  Output Path: {}", output_path);
+
+    // Validate input files
+    let video_file = PathBuf::from(&video_path);
+    let translated_audio_file = PathBuf::from(&translated_audio_path);
+    let original_audio_file = PathBuf::from(&original_audio_path);
+    let original_vtt_file = PathBuf::from(&original_vtt_path);
+    let translated_vtt_file = PathBuf::from(&translated_vtt_path);
+
+    if !video_file.exists() {
+        return Err(format!("Video file not found: {}", video_path));
+    }
+    if !translated_audio_file.exists() {
+        return Err(format!("Translated audio file not found: {}", translated_audio_path));
+    }
+    if !original_audio_file.exists() {
+        return Err(format!("Original audio file not found: {}", original_audio_path));
+    }
+    if !original_vtt_file.exists() {
+        return Err(format!("Original VTT file not found: {}", original_vtt_path));
+    }
+    if !translated_vtt_file.exists() {
+        return Err(format!("Translated VTT file not found: {}", translated_vtt_path));
+    }
 
     // Create progress channel
     let (tx, mut rx) = mpsc::channel::<merge::MergeProgress>(32);
@@ -439,11 +463,11 @@ pub async fn merge_media(
         .to_path_buf();
     
     let result = match merge::merge_files(
-        &PathBuf::from(video_path),
-        &PathBuf::from(translated_audio_path),
-        &PathBuf::from(original_audio_path),
-        &PathBuf::from(original_vtt_path),
-        &PathBuf::from(translated_vtt_path),
+        &video_file,
+        &translated_audio_file,
+        &original_audio_file,
+        &original_vtt_file,
+        &translated_vtt_file,
         &output_dir,
         Some(tx),
     ).await {
@@ -454,6 +478,11 @@ pub async fn merge_media(
             // Wait for monitoring task to complete
             let _ = monitoring_task.await;
             
+            // Emit merge-complete event only on success
+            if let Err(e) = window.emit("merge-complete", true) {
+                log::error!("Failed to emit merge-complete event: {}", e);
+            }
+            
             Ok(MergeResult {
                 output_path: result_path.to_string_lossy().to_string(),
                 output_dir: output_dir.to_string_lossy().to_string(),
@@ -461,14 +490,9 @@ pub async fn merge_media(
         }
         Err(e) => {
             log::error!("Merge failed: {}", e);
-            Err(format!("Merge failed: {}", e))
+            Err(e.to_string())
         }
     };
-
-    // Emit final event regardless of success/failure
-    if let Err(e) = window.emit("merge-complete", true) {
-        log::error!("Failed to emit merge-complete event: {}", e);
-    }
 
     result
 }
@@ -583,7 +607,7 @@ pub async fn process_video(
     let merge_result = match merge_media(
         download_result.video_path.clone(),
         tts_result.audio_path.clone(),
-        download_result.audio_path.clone(),  // Original audio from download step
+        download_result.audio_path.clone(),
         transcription_result.vtt_path.clone(),
         translation_result.translated_vtt_path.clone(),
         output_path.clone(),

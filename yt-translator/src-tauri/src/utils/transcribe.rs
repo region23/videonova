@@ -107,7 +107,7 @@ pub async fn transcribe_audio(
     language: Option<String>,
     progress_sender: Option<mpsc::Sender<TranscriptionProgress>>,
 ) -> Result<PathBuf> {
-    info!("Starting transcription process for file: {}", audio_path.display());
+    info!("Starting transcription process");
     
     // Validate API key
     if api_key.trim().is_empty() {
@@ -115,14 +115,8 @@ pub async fn transcribe_audio(
         return Err(anyhow!("OpenAI API key is required for transcription"));
     }
     
-    debug!("Using OpenAI API key: {}...", if api_key.len() >= 4 { &api_key[..4] } else { "[invalid]" });
-    if let Some(lang) = &language {
-        debug!("Using language: {}", lang);
-    }
-    
     // Always use VTT format
     let format = ResponseFormat::Vtt;
-    debug!("Using response format: {}", format.to_string());
     
     // Расширение выходного файла зависит от формата ответа
     let file_extension = match format {
@@ -134,29 +128,20 @@ pub async fn transcribe_audio(
     };
     
     // Create output directory if it doesn't exist
-    debug!("Creating output directory: {}", output_dir.display());
-    match fs::create_dir_all(output_dir).await {
-        Ok(_) => debug!("Output directory created or already exists"),
-        Err(e) => {
-            error!("Failed to create output directory: {}", e);
-            return Err(anyhow!("Failed to create output directory: {}", e));
-        }
+    if let Err(e) = fs::create_dir_all(output_dir).await {
+        error!("Failed to create output directory: {}", e);
+        return Err(anyhow!("Failed to create output directory: {}", e));
     }
     
     // Проверяем существование файла
-    debug!("Checking if audio file exists: {}", audio_path.display());
     if !audio_path.exists() {
-        error!("Audio file does not exist: {}", audio_path.display());
-        return Err(anyhow!("Audio file does not exist: {}", audio_path.display()));
+        error!("Audio file does not exist");
+        return Err(anyhow!("Audio file does not exist"));
     }
     
     // Проверяем права доступа к файлу
-    debug!("Checking if audio file is accessible: {}", audio_path.display());
     let metadata = match std::fs::metadata(audio_path) {
-        Ok(meta) => {
-            debug!("File metadata retrieved successfully");
-            meta
-        },
+        Ok(meta) => meta,
         Err(e) => {
             error!("Failed to get file metadata: {}", e);
             return Err(anyhow!("Failed to get file metadata: {}", e));
@@ -164,11 +149,9 @@ pub async fn transcribe_audio(
     };
     
     if !metadata.is_file() {
-        error!("Path is not a file: {}", audio_path.display());
-        return Err(anyhow!("Path is not a file: {}", audio_path.display()));
+        error!("Path is not a file");
+        return Err(anyhow!("Path is not a file"));
     }
-    
-    debug!("Opening audio file: {}", audio_path.display());
     
     // Define output file path (same name as input but with appropriate extension)
     let file_stem = audio_path
@@ -178,14 +161,11 @@ pub async fn transcribe_audio(
     
     // Обрабатываем имя файла - переводим в нижний регистр и заменяем пробелы на подчеркивания
     let sanitized_file_stem = sanitize_filename(&file_stem);
-    debug!("Original file stem: {}, sanitized: {}", file_stem, sanitized_file_stem);
-    
     let output_path = output_dir.join(format!("{}.{}", sanitized_file_stem, file_extension));
-    debug!("Output will be saved to: {}", output_path.display());
 
     // Check if transcription file already exists
     if check_file_exists_and_valid(&output_path).await {
-        info!("Found existing transcription file, skipping transcription");
+        info!("Found existing transcription file");
         return Ok(output_path);
     }
 
@@ -202,10 +182,7 @@ pub async fn transcribe_audio(
 
     // Читаем файл целиком в память
     let file_content = match tokio::fs::read(audio_path).await {
-        Ok(content) => {
-            debug!("File read successfully, size: {} bytes", content.len());
-            content
-        },
+        Ok(content) => content,
         Err(e) => {
             error!("Failed to read audio file: {}", e);
             return Err(anyhow!("Failed to read audio file: {}", e));
@@ -228,7 +205,6 @@ pub async fn transcribe_audio(
     // Добавляем файл
     form.add_file("file", &filename, &file_content, "application/octet-stream");
 
-
     // Получаем финальное тело запроса
     let body = form.finish();
     
@@ -244,13 +220,10 @@ pub async fn transcribe_audio(
     }
     
     // Create the client and request
-    debug!("Initializing HTTP client for OpenAI API");
     let client = reqwest::Client::new();
     
     // Отправляем запрос
-    info!("Sending request to OpenAI Whisper API...");
-    debug!("API endpoint: https://api.openai.com/v1/audio/transcriptions");
-    debug!("Request Content-Type: {}", form.content_type());
+    info!("Sending request to OpenAI Whisper API");
     
     let response_result = client
         .post("https://api.openai.com/v1/audio/transcriptions")
@@ -264,7 +237,6 @@ pub async fn transcribe_audio(
         Ok(response) => {
             let status = response.status();
             info!("OpenAI API response status: {}", status);
-            debug!("Response headers: {:#?}", response.headers());
             
             // Send progress update
             if let Some(sender) = &progress_sender {
@@ -280,18 +252,12 @@ pub async fn transcribe_audio(
             // Check if request was successful
             if !status.is_success() {
                 let error_text = response.text().await?;
-                error!("OpenAI API error: HTTP {}, body: {}", status, error_text);
+                error!("OpenAI API error: HTTP {}", status);
                 return Err(anyhow!("API request failed (HTTP {}): {}", status, error_text));
             }
             
             // Get response text
             let content = response.text().await?;
-            debug!("Received content, length: {} bytes", content.len());
-            if content.len() < 1000 {
-                debug!("Content preview: {}", content);
-            } else {
-                debug!("Content preview (first 500 bytes): {}", &content[..500]);
-            }
             
             // Send progress update
             if let Some(sender) = &progress_sender {
@@ -305,7 +271,6 @@ pub async fn transcribe_audio(
             }
             
             // Write content to file
-            debug!("Writing content to file: {}", output_path.display());
             let mut output_file = File::create(&output_path).await?;
             output_file.write_all(content.as_bytes()).await?;
             
@@ -320,23 +285,12 @@ pub async fn transcribe_audio(
                     .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
             }
             
-            info!("Transcription completed successfully! Output saved to: {}", output_path.display());
+            info!("Transcription completed successfully");
             Ok(output_path)
         },
         Err(err) => {
             error!("Failed to connect to OpenAI API: {}", err);
-            
-            // Добавляем детальную информацию об ошибке
-            let error_message = match err.is_timeout() {
-                true => format!("Connection timeout: {}", err),
-                false => match err.is_connect() {
-                    true => format!("Connection error: {}", err),
-                    false => format!("Request error: {}", err),
-                }
-            };
-            
-            warn!("Detailed error info: {}", error_message);
-            Err(anyhow!("Failed to connect to OpenAI API: {}", error_message))
+            Err(anyhow!("Failed to connect to OpenAI API: {}", err))
         }
     }
 } 

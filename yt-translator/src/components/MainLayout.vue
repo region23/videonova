@@ -7,6 +7,7 @@ import YouTubeInput from './YouTubeInput.vue'
 import LanguageSelector from './LanguageSelector.vue'
 import VideoPreview from './VideoPreview.vue'
 import ApiKeyInput from './ApiKeyInput.vue'
+import appLogo from '../assets/app_icon_2.png'
 
 interface Language {
   code: string
@@ -40,6 +41,22 @@ interface ProcessVideoResult {
   final_path: string
 }
 
+interface TTSResult {
+  audio_path: string
+}
+
+interface MergeResult {
+  output_path: string
+}
+
+interface TranscriptionResult {
+  vtt_path: string
+}
+
+interface TranslationResult {
+  translated_vtt_path: string
+}
+
 const isProcessing = ref(false)
 const error = ref('')
 const selectedLanguages = ref<LanguagePair | null>(null)
@@ -51,10 +68,15 @@ const selectedPath = ref('')
 const isVideoInfoReady = ref(false)
 const isSourceLanguageDetected = ref(false)
 
+// Add state for tracking process results
+const downloadResult = ref<DownloadResult | null>(null)
+const transcriptionResult = ref<TranscriptionResult | null>(null)
+const translationResult = ref<TranslationResult | null>(null)
+
 // Listen for the show-settings event
 let unlisten: (() => void) | undefined
 
-// Add new refs for progress states with правильной типизацией
+// Add new refs for progress states
 const transcriptionProgress = ref<any>(null)
 const translationProgress = ref<any>(null)
 const ttsProgress = ref<any>(null)
@@ -77,15 +99,10 @@ onMounted(async () => {
 })
 
 const handleVideoInfo = (info: VideoInfo) => {
-  console.log('Video info received:', info ? 'present' : 'null/undefined');
-  
-  // Если информация о видео успешно загружена, устанавливаем isVideoInfoReady в true
   if (info) {
-    console.log('Video info loaded successfully, setting isVideoInfoReady to true');
     videoInfo.value = info;
     isVideoInfoReady.value = true;
   } else {
-    console.log('Video info is null/undefined, resetting state');
     videoInfo.value = null;
     isVideoInfoReady.value = false;
   }
@@ -106,41 +123,73 @@ const handleDownloadStart = () => {
 }
 
 const handleDownloadComplete = (result: DownloadResult) => {
-  console.log("Download completed in MainLayout, emitting result:", result)
+  downloadResult.value = result
 }
 
 const handleTranscriptionProgress = (progress: any) => {
-  console.log("Transcription progress in MainLayout:", progress)
   transcriptionProgress.value = progress
 }
 
-const handleTranscriptionComplete = (result: any) => {
-  console.log("Transcription complete in MainLayout:", result)
+const handleTranscriptionComplete = (result: TranscriptionResult) => {
+  transcriptionResult.value = result
   transcriptionProgress.value = { status: 'Complete', progress: 100 }
 }
 
 const handleTranslationProgress = (progress: any) => {
-  console.log("Translation progress in MainLayout:", progress)
   translationProgress.value = progress
 }
 
-const handleTranslationComplete = (result: any) => {
-  console.log("Translation complete in MainLayout:", result)
+const handleTranslationComplete = (result: TranslationResult) => {
+  translationResult.value = result
   translationProgress.value = { status: 'Complete', progress: 100 }
 }
 
 const handleTTSProgress = (progress: any) => {
-  console.log("TTS progress in MainLayout:", progress)
   ttsProgress.value = progress
 }
 
-const handleTTSComplete = (result: any) => {
-  console.log("TTS complete in MainLayout:", result)
+const handleTTSComplete = (result: TTSResult) => {
   ttsProgress.value = { status: 'Complete', progress: 100 }
+  // Removing automatic merge trigger from TTS completion
+  // The merge will be handled by handleProcessClick after process_video completes
+}
+
+const startMergeProcess = async (ttsResult: TTSResult) => {
+  if (!downloadResult.value) {
+    console.error('Download result is missing, cannot start merge')
+    return
+  }
+
+  if (!transcriptionResult.value || !translationResult.value) {
+    console.error('Transcription or translation results are missing, cannot start merge')
+    return
+  }
+
+  try {
+    const unlistenMergeProgress = await listen('merge-progress', (event) => {
+      handleMergeProgress(event.payload)
+    })
+
+    const unlistenMergeComplete = await listen('merge-complete', () => {
+      unlistenMergeProgress()
+      handleMergeComplete()
+    })
+
+    await invoke<MergeResult>('merge_media', {
+      videoPath: downloadResult.value.video_path,
+      translatedAudioPath: ttsResult.audio_path,
+      originalAudioPath: downloadResult.value.audio_path,
+      originalVttPath: transcriptionResult.value?.vtt_path,
+      translatedVttPath: translationResult.value?.translated_vtt_path,
+      outputPath: selectedPath.value
+    })
+  } catch (e) {
+    console.error('Failed to merge media:', e)
+    handleDownloadError(e instanceof Error ? e.message : 'Failed to merge media')
+  }
 }
 
 const handleMergeProgress = (progress: any) => {
-  console.log("Merge progress in MainLayout:", progress)
   mergeProgress.value = progress
 }
 
@@ -167,39 +216,12 @@ const handleStartDownload = async (url: string, path: string) => {
 }
 
 const handleProcessClick = async () => {
-  console.log('=== Process Video Started ===')
-  console.log('Initial state:', {
-    videoInfo: videoInfo.value,
-    selectedLanguages: selectedLanguages.value,
-    selectedPath: selectedPath.value,
-    isVideoInfoReady: isVideoInfoReady.value,
-    currentUrl: currentUrl.value,
-    isProcessing: isProcessing.value
-  })
-
-  if (!videoInfo.value) {
-    console.warn('Process aborted: No video info available')
-    error.value = 'Please enter a valid YouTube URL first'
-    return
-  }
-  if (!selectedLanguages.value) {
-    console.warn('Process aborted: No languages selected')
-    error.value = 'Please select languages first'
-    return
-  }
-  if (!selectedPath.value) {
-    console.warn('Process aborted: No download folder selected')
-    error.value = 'Please select a download folder first'
-    return
-  }
-  if (!isVideoInfoReady.value) {
-    console.warn('Process aborted: Video info not ready')
-    error.value = 'Please wait for video information to load'
+  if (!videoInfo.value || !selectedLanguages.value || !selectedPath.value || !isVideoInfoReady.value) {
+    console.warn('Process aborted: missing required data')
     return
   }
 
   try {
-    // Get API key from store
     const store = await TauriStore.load('.settings.dat')
     const apiKey = await store.get('openai-api-key') as string
     
@@ -210,23 +232,21 @@ const handleProcessClick = async () => {
       return
     }
 
-    console.log('Starting video processing pipeline...')
-    console.log('Processing parameters:', {
-      url: currentUrl.value,
-      outputPath: selectedPath.value,
-      targetLanguage: selectedLanguages.value.target.code,
-      targetLanguageName: selectedLanguages.value.target.name
-    })
-    
     isProcessing.value = true
     error.value = ''
     
-    // Initialize progress states immediately
-    // Сначала показываем только подготовку к загрузке
+    // Reset progress states
     transcriptionProgress.value = null
     translationProgress.value = null
     ttsProgress.value = null
     mergeProgress.value = null
+
+    // Pre-set download result paths
+    const videoFileName = currentUrl.value.split('v=')[1].replace(/[^a-zA-Z0-9]/g, '_')
+    downloadResult.value = {
+      video_path: `${selectedPath.value}/${videoFileName}_video.mp4`,
+      audio_path: `${selectedPath.value}/${videoFileName}_audio.m4a`
+    }
     
     const result = await invoke<ProcessVideoResult>('process_video', {
       url: currentUrl.value,
@@ -239,18 +259,37 @@ const handleProcessClick = async () => {
       wordsPerSecond: 3.0
     })
     
-    console.log('Processing completed successfully:', result)
-    handleDownloadComplete({
+    // Set all results after process_video completes
+    downloadResult.value = {
       video_path: result.video_path,
       audio_path: result.audio_path
-    })
+    }
+    
+    transcriptionResult.value = {
+      vtt_path: result.transcription_path
+    }
+    
+    translationResult.value = {
+      translated_vtt_path: result.translation_path
+    }
+
+    // Start merge process with TTS result
+    if (result.tts_path) {
+      console.log('Starting merge process after video processing')
+      await startMergeProcess({ audio_path: result.tts_path })
+    } else {
+      console.error('TTS path is missing from process_video result')
+      error.value = 'Failed to get TTS audio path'
+      isProcessing.value = false
+    }
+
   } catch (e) {
-    console.error('Pipeline failed:', e)
-    console.error('Error details:', {
-      message: e instanceof Error ? e.message : 'Unknown error',
-      error: e
-    })
-    handleDownloadError(e instanceof Error ? e.message : 'Failed to process video. Please try again.')
+    console.error('Pipeline failed:', e instanceof Error ? e.message : e)
+    handleDownloadError(e instanceof Error ? e.message : 'Failed to process video')
+    // Reset all results if process failed
+    downloadResult.value = null
+    transcriptionResult.value = null
+    translationResult.value = null
   }
 }
 
@@ -279,6 +318,18 @@ const handleVideoInfoReadyStateChange = (isReady: boolean) => {
       <main>
         <div class="content-wrapper">
           <div class="content-card main-content">
+            <header class="app-header">
+              <div class="app-branding">
+                <img :src="appLogo" alt="Videonova Logo" class="app-logo" />
+                <div class="app-info">
+                  <h1 class="app-name">Videonova</h1>
+                  <p class="app-description">Translate your&nbsp;favorite YouTube&nbsp;videos into&nbsp;any language with&nbsp;AI&#8209;powered voice&nbsp;translation</p>
+                </div>
+              </div>
+            </header>
+
+            <div class="divider"></div>
+
             <YouTubeInput 
               :disabled="isProcessing"
               :folder-select-disabled="!isVideoInfoReady || isProcessing"
@@ -325,7 +376,7 @@ const handleVideoInfoReadyStateChange = (isReady: boolean) => {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" class="icon">
                   <path d="M5 12h14m-4-4l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
-                {{ isProcessing ? 'Processing...' : 'Process Video' }}
+                {{ isProcessing ? 'Translating...' : 'Translate Video' }}
               </span>
             </button>
           </div>
@@ -362,6 +413,47 @@ const handleVideoInfoReadyStateChange = (isReady: boolean) => {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
+}
+
+.app-header {
+  margin-bottom: 0.5rem;
+}
+
+.app-branding {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.app-logo {
+  width: 88px;
+  height: 88px;
+  object-fit: contain;
+}
+
+.app-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.app-name {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+  margin: 0;
+  background: linear-gradient(135deg, #4F46E5, #E11D48, #F97316);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.app-description {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.4;
 }
 
 main {
@@ -471,6 +563,20 @@ main {
 
   .main-layout {
     padding: 0 1rem;
+  }
+
+  .app-branding {
+    flex-direction: column;
+    text-align: center;
+    gap: 1rem;
+  }
+
+  .app-info {
+    align-items: center;
+  }
+
+  .app-description {
+    font-size: 0.9rem;
   }
 
   .description {

@@ -29,10 +29,11 @@ watch(() => props.initialSourceLanguage, (newCode) => {
 <template>
   <div class="language-selector">
     <div class="language-pair">
+      <span class="translate-label">Translate from</span>
+      
       <div class="language-select">
-        <div class="label-container">
-          <label for="source-language">From</label>
-          <span v-if="props.sourceLanguageDetected" class="auto-detected-badge">Auto-detected</span>
+        <div class="label-container" v-if="props.sourceLanguageDetected">
+          <span class="auto-detected-badge">Auto-detected</span>
         </div>
         <div class="select-wrapper">
           <select
@@ -53,27 +54,26 @@ watch(() => props.initialSourceLanguage, (newCode) => {
       </div>
 
       <div class="language-divider">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-          <path d="M5 12h14m-4-4l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        <span class="divider-text">to</span>
       </div>
 
       <div class="language-select">
-        <label for="target-language">To</label>
-        <select
-          id="target-language"
-          v-model="targetLanguage"
-          :disabled="sourceLanguage.code === targetLanguage.code || props.disabled"
-        >
-          <option
-            v-for="lang in languages"
-            :key="lang.code"
-            :value="lang"
-            :disabled="sourceLanguage.code === lang.code"
+        <div class="select-wrapper">
+          <select
+            id="target-language"
+            v-model="targetLanguage"
+            :disabled="sourceLanguage.code === targetLanguage.code || props.disabled"
           >
-            {{ lang.name }}
-          </option>
-        </select>
+            <option
+              v-for="lang in languages"
+              :key="lang.code"
+              :value="lang"
+              :disabled="sourceLanguage.code === lang.code"
+            >
+              {{ lang.name }}
+            </option>
+          </select>
+        </div>
       </div>
     </div>
   </div>
@@ -81,51 +81,46 @@ watch(() => props.initialSourceLanguage, (newCode) => {
 
 <style scoped>
 .language-selector {
-  text-align: center;
-}
-
-h2 {
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 1rem;
-  letter-spacing: -0.01em;
+  width: 100%;
+  padding-top: 16px;
 }
 
 .language-pair {
   display: flex;
   gap: 1rem;
-  justify-content: center;
-  align-items: flex-end;
-  flex-wrap: wrap;
+  align-items: center;
+  width: 100%;
+}
+
+.translate-label {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .language-select {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
+  position: relative;
+  flex: 1;
   min-width: 200px;
 }
 
 .language-divider {
   color: var(--text-secondary);
-  display: flex;
-  align-items: center;
-  margin-bottom: 4px;
+  font-size: 0.875rem;
+  white-space: nowrap;
+  padding: 0 0.5rem;
 }
 
 .label-container {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-left: 0.80rem;
+  position: absolute;
+  top: -30px;
+  left: 9px;
 }
 
-label {
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--text-secondary);
-  text-align: left;
+.select-wrapper {
+  position: relative;
+  width: 100%;
 }
 
 select {
@@ -135,34 +130,17 @@ select {
   background-position: right 0.7rem center;
   background-size: 1em;
   padding: 0.5rem 2.5rem 0.5rem 0.75rem;
+  width: 100%;
   cursor: pointer;
+  border: 1px solid var(--border-color, #e2e8f0);
+  border-radius: 6px;
+  font-size: 0.875rem;
 }
 
 select:disabled {
   opacity: 0.5;
   cursor: not-allowed;
   pointer-events: none;
-}
-
-@media (max-width: 640px) {
-  .language-pair {
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .language-divider {
-    transform: rotate(90deg);
-    padding: 0.5rem;
-  }
-
-  .language-select {
-    width: 100%;
-  }
-}
-
-.select-wrapper {
-  position: relative;
-  width: 100%;
 }
 
 .auto-detected-badge {
@@ -173,5 +151,22 @@ select:disabled {
   border-radius: 4px;
   font-weight: 500;
   display: inline-block;
+}
+
+@media (max-width: 640px) {
+  .language-pair {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .language-select {
+    width: 100%;
+  }
+  
+  .label-container {
+    position: static;
+    transform: none;
+    margin-bottom: 4px;
+  }
 }
 </style> 

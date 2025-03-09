@@ -118,18 +118,11 @@ async fn generate_audio_segment(
     
     // Always use normal speed instead of slowing down
     let speed = if estimated_duration < target_duration {
-        // Use normal speed (or slightly faster if estimated duration is much less than target)
         1.0
     } else {
-        // If we need to speed up to fit, we can still do that (up to reasonable limits)
         let calculated_speed = estimated_duration / target_duration;
         calculated_speed.min(4.0) // Cap at max speed of 4.0
     };
-    
-    log::info!(
-        "Segment {}: Text: \"{}\", Words: {}, Duration: {:.2}s, Estimated: {:.2}s, Speed: {:.2}",
-        segment.index, segment.text, word_count, target_duration, estimated_duration, speed
-    );
     
     // Prepare request to OpenAI TTS API
     let url = "https://api.openai.com/v1/audio/speech";
@@ -162,11 +155,6 @@ async fn generate_audio_segment(
     // Get the actual duration of the generated audio using ffmpeg
     let actual_duration = get_audio_duration(&segment_file)?;
     
-    log::info!(
-        "Segment {} audio generated: actual duration = {:.2}s, target duration = {:.2}s",
-        segment.index, actual_duration, target_duration
-    );
-    
     Ok((segment_file, actual_duration, target_duration))
 }
 
@@ -193,11 +181,9 @@ pub async fn generate_tts(
     
     // Check if TTS file already exists
     if check_file_exists_and_valid(&output_file).await {
-        info!("Found existing TTS file: {}", output_file.display());
+        info!("Found existing TTS file");
         return Ok(output_file);
     }
-
-    info!("Will create new TTS file: {}", output_file.display());
     
     // Parse VTT file
     let segments = parse_vtt_file(vtt_file)?;
@@ -206,8 +192,6 @@ pub async fn generate_tts(
     if total_segments == 0 {
         return Err(anyhow!("No segments found in the VTT file"));
     }
-    
-    log::info!("Found {} segments in VTT file", total_segments);
     
     // Report initial progress
     if let Some(sender) = &progress_channel {
@@ -260,8 +244,6 @@ pub async fn generate_tts(
             let gap_duration = start - last_time;
             let silence_file = output_dir.join(format!("silence_gap_{:.3}.mp3", start));
             
-            log::info!("Adding gap silence of {:.2}s before segment at {:.2}s", gap_duration, start);
-            
             // Generate silence using ffmpeg
             let status = Command::new("ffmpeg")
                 .args([
@@ -294,8 +276,6 @@ pub async fn generate_tts(
             if silence_duration > 0.1 {
                 let segment_index = audio_files.iter().position(|s| &s.2 == file_path).unwrap_or(0);
                 let silence_file = output_dir.join(format!("silence_padding_{}.mp3", segment_index));
-                
-                log::info!("Adding padding silence of {:.2}s after segment {}", silence_duration, segment_index);
                 
                 // Generate silence using ffmpeg
                 let status = Command::new("ffmpeg")
@@ -356,8 +336,6 @@ pub async fn generate_tts(
         }).await?;
     }
 
-    log::info!("Cleaning up temporary audio files...");
-
     // Collect all temporary file paths
     let mut temp_files = Vec::new();
 
@@ -382,16 +360,11 @@ pub async fn generate_tts(
     temp_files.push(concat_file.clone());
 
     // Delete all temporary files
-    let mut deleted_count = 0;
     for file in temp_files {
         if let Err(e) = fs::remove_file(&file) {
             log::warn!("Failed to delete temporary file {}: {}", file.display(), e);
-        } else {
-            deleted_count += 1;
         }
     }
-
-    log::info!("Cleaned up {} temporary files", deleted_count);
 
     // Final progress update
     if let Some(sender) = &progress_channel {
