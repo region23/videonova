@@ -1,0 +1,33 @@
+changelog:
+  categories:
+    - title: '🚀 Новые функции'
+      labels:
+        - 'feature'
+        - 'enhancement'
+    - title: '🐛 Исправления'
+      labels:
+        - 'fix'
+        - 'bug'
+    - title: '🧰 Обслуживание'
+      labels:
+        - 'chore'
+        - 'maintenance'
+        - 'refactor'
+    - title: '📚 Документация'
+      labels:
+        - 'documentation'
+    - title: '⚡ Производительность'
+      labels:
+        - 'performance'
+    - title: '🧪 Тесты'
+      labels:
+        - 'test'
+    - title: '🔄 Зависимости'
+      labels:
+        - 'dependencies'
+    - title: '📦 Сборка'
+      labels:
+        - 'build'
+    - title: 'Прочие изменения'
+      labels:
+        - '*' 
