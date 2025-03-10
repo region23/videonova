@@ -9,7 +9,6 @@ edition = "2024"
 tauri-build = { version = "2.0.6", features = [] }
 
 [dependencies]
-tts-sync = { path = "./src/tts-sync" }
 tauri = { version = "2.3.1", features = [] }
 tauri-plugin-opener = "2.2"
 tauri-plugin-dialog = "2.2"
@@ -56,6 +55,9 @@ uuid = { version = "1.3", features = ["v4"] }
 
 # Время и даты (новая зависимость для системы прогресса)
 chrono = "0.4"
+
+# TTS library
+tts-sync = { git = "https://github.com/region23/tts-sync.git" }
 
 [dev-dependencies]
 criterion = "0.5"

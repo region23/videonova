@@ -1548,19 +1548,6 @@ dependencies = [
 
 [[package]]
 name = "env_logger"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cd405aab171cb85d6735e5c8d9db038c17d3ca007a4d2c25f337935c3d90580"
-dependencies = [
- "humantime",
- "is-terminal",
- "log",
- "regex",
- "termcolor",
-]
-
-[[package]]
-name = "env_logger"
 version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcaee3d8e3cfc3fd92428d477bc97fc29ec8716d180c0d74c643bb26166660e0"
@@ -4430,12 +4417,10 @@ dependencies = [
  "system-configuration 0.5.1",
  "tokio",
  "tokio-native-tls",
- "tokio-util",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
  "web-sys",
  "winreg 0.50.0",
 ]
@@ -5815,15 +5800,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "termcolor"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
-dependencies = [
- "winapi-util",
-]
-
-[[package]]
 name = "thin-slice"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6336,34 +6312,23 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tts-sync"
-version = "0.2.0"
+version = "0.1.2"
+source = "git+https://github.com/region23/tts-sync.git#5deea42b2643bee6a7fb1f3960f7a797460a0143"
 dependencies = [
  "anyhow",
  "async-trait",
- "bytes",
  "chrono",
- "dasp",
- "env_logger 0.10.2",
- "futures",
- "lazy_static",
+ "env_logger",
  "log",
- "md5",
- "parking_lot",
- "path-clean",
- "rand 0.8.5",
- "rayon",
+ "once_cell",
  "regex",
  "reqwest 0.11.27",
  "rubato",
  "serde",
  "serde_json",
  "symphonia",
- "tempfile",
  "thiserror 1.0.69",
  "tokio",
- "uuid",
- "walkdir",
- "webrtc-vad",
 ]
 
 [[package]]
@@ -6546,7 +6511,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dasp",
- "env_logger 0.11.6",
+ "env_logger",
  "futures",
  "lazy_static",
  "log",

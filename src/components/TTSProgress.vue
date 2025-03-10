@@ -30,10 +30,7 @@ const progressColor = computed(() => {
     </div>
     
     <div class="progress-status">
-      {{ status }}
-      <span v-if="current_segment && total_segments" class="segment-counter">
-        (Segment {{ current_segment }}/{{ total_segments }})
-      </span>
+      <span class="status-text">{{ status }}</span>
     </div>
     
     <div class="progress-bar-container">
@@ -78,12 +75,11 @@ const progressColor = computed(() => {
   font-size: 0.9rem;
   color: var(--text-secondary);
   margin-bottom: 0.75rem;
+  min-height: 1.5em;
 }
 
-.segment-counter {
-  font-size: 0.8rem;
-  opacity: 0.8;
-  margin-left: 0.25rem;
+.status-text {
+  font-style: italic;
 }
 
 .progress-bar-container {

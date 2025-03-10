@@ -43,6 +43,8 @@ interface TTSProgress {
   progress: number
   current_segment?: number
   total_segments?: number
+  step_progress?: number  // Add step_progress field from backend
+  readonly value?: any    // Add the readonly value field to fix linter error
 }
 
 // Добавляем интерфейс для результата финального объединения
@@ -312,16 +314,24 @@ function logComponentState(reason: string) {
 const ttsUpdateQueue: TTSProgress[] = [];
 let processingTTSQueue = false;
 
-function queueTTSUpdate(progress: TTSProgress) {
+function queueTTSUpdate(progress: any) {
+  // Create a new object instead of modifying the original
+  const processedProgress: TTSProgress = { ...progress };
+  
+  // Map backend's step_progress to progress if it exists
+  if (progress.step_progress !== undefined && (progress.progress === undefined || progress.progress === null)) {
+    processedProgress.progress = progress.step_progress;
+  }
+  
   // Add to queue, replacing any previous item if same segment
   const existingIndex = ttsUpdateQueue.findIndex(p => 
-    p.current_segment === progress.current_segment
+    p.current_segment === processedProgress.current_segment
   );
   
   if (existingIndex >= 0) {
-    ttsUpdateQueue[existingIndex] = progress;
+    ttsUpdateQueue[existingIndex] = processedProgress;
   } else {
-    ttsUpdateQueue.push(progress);
+    ttsUpdateQueue.push(processedProgress);
   }
   
   // Start processing if not already running
@@ -340,43 +350,49 @@ function processTTSQueue() {
   
   const nextProgress = ttsUpdateQueue.shift();
   if (nextProgress) {
-    setTimeout(() => {
-      const shouldUpdate = 
-        !ttsProgress.value || 
-        Math.floor(ttsProgress.value.progress) !== Math.floor(nextProgress.progress) ||
-        ttsProgress.value.current_segment !== nextProgress.current_segment ||
-        nextProgress.progress === 100;
-      
-      if (shouldUpdate) {
-        ttsProgress.value = nextProgress;
+    // Force update on the next animation frame to avoid UI blocking
+    requestAnimationFrame(() => {
+      console.log('Processing TTS update:', 
+        `Progress: ${nextProgress.progress}%, Status: ${nextProgress.status || 'N/A'}`);
         
-        if (nextProgress.progress === 0) {
-          console.log('TTS process starting');
-          isTTSGenerating.value = true;
-          ttsStepComplete.value = false; // Сбрасываем флаг завершения при старте
-        } else if (nextProgress.progress === 100) {
-          console.log('TTS process complete');
-          // Проверяем успешность генерации
-          if (nextProgress.status && nextProgress.status.toLowerCase().includes('error')) {
-            console.error('TTS generation failed:', nextProgress.status);
-            ttsStepComplete.value = false;
-          } else {
-            isTTSGenerating.value = false;
-            ttsStepComplete.value = true;
-            // Если файл уже существовал, отмечаем следующий шаг как завершенный
-            if (!isMerging.value && props.mergeProgress?.progress === 100) {
-              mergeStepComplete.value = true;
-            }
-          }
-          // Очищаем прогресс с задержкой
-          setTimeout(() => {
-            ttsProgress.value = null;
-          }, 1000);
-        }
+      // Always update the progress value for TTS to ensure UI reflects current state
+      if (ttsProgress.value === null) {
+        ttsProgress.value = { ...nextProgress };
+      } else {
+        ttsProgress.value.progress = nextProgress.progress;
+        ttsProgress.value.status = nextProgress.status;
+        ttsProgress.value.current_segment = nextProgress.current_segment;
+        ttsProgress.value.total_segments = nextProgress.total_segments;
       }
       
-      setTimeout(processTTSQueue, 100);
-    }, 0);
+      // Check for status changes
+      if (nextProgress.progress === 0) {
+        console.log('TTS process starting');
+        isTTSGenerating.value = true;
+        ttsStepComplete.value = false; // Сбрасываем флаг завершения при старте
+      } else if (nextProgress.progress === 100) {
+        console.log('TTS process complete');
+        // Проверяем успешность генерации
+        if (nextProgress.status && nextProgress.status.toLowerCase().includes('error')) {
+          console.error('TTS generation failed:', nextProgress.status);
+          ttsStepComplete.value = false;
+        } else {
+          isTTSGenerating.value = false;
+          ttsStepComplete.value = true;
+          // Если файл уже существовал, отмечаем следующий шаг как завершенный
+          if (!isMerging.value && props.mergeProgress?.progress === 100) {
+            mergeStepComplete.value = true;
+          }
+        }
+        // Очищаем прогресс с задержкой
+        setTimeout(() => {
+          ttsProgress.value = null;
+        }, 1000);
+      }
+      
+      // Process next item in queue after small delay
+      setTimeout(processTTSQueue, 50);
+    });
   }
 }
 
@@ -739,18 +755,7 @@ watch(() => props.transcriptionProgress, (newProgress) => {
   }
 }, { immediate: true })
 
-// Оптимизация обработки пропсов TTS
-watch(() => props.ttsProgress, (newProgress) => {
-  if (newProgress) {
-    trackUIBlocking('TTS progress props update');
-    
-    // Используем дебаунсинг для пропсов так же, как для событий
-    // Это поможет избежать блокировки UI при частых обновлениях
-    queueTTSUpdate({...newProgress});
-  }
-}, { immediate: true })
-
-// Оптимизированный обработчик для Translation
+// Оптимизация обработки пропсов Translation
 watch(() => props.translationProgress, (newProgress) => {
   if (newProgress) {
     trackUIBlocking('Translation progress update');

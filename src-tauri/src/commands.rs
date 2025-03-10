@@ -5,15 +5,14 @@ use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
+    Mutex,
 };
+use std::thread;
 use tauri::Emitter;
 use tokio::sync::mpsc;
 use serde_json::json;
 use futures::FutureExt;
-use tts_sync::{
-    progress::{DefaultProgressReporter, ProgressObserver, ProgressInfo, ProgressReporter},
-    synchronize_tts_with_progress,
-};
+use tts_sync::TtsSync;
 
 use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
 use crate::utils::transcribe;
@@ -392,22 +391,6 @@ impl TauriProgressObserver {
     }
 }
 
-impl ProgressObserver for TauriProgressObserver {
-    fn on_progress_update(&self, progress: ProgressInfo) {
-        if let Err(e) = self.window.emit("tts-progress", json!({
-            "step": progress.step,
-            "step_progress": progress.step_progress,
-            "total_progress": progress.total_progress,
-            "details": progress.details
-        })) {
-            error!("Failed to emit TTS progress: {}", e);
-        } else {
-            info!("TTS progress emitted: step={}, progress={:.1}%, total={:.1}%",
-                progress.step, progress.step_progress, progress.total_progress);
-        }
-    }
-}
-
 /// Enhanced TTS function with detailed logging for troubleshooting
 async fn enhanced_tts_with_logging(
     video_path: &str,
@@ -416,7 +399,7 @@ async fn enhanced_tts_with_logging(
     translated_vtt_path: &str,
     output_path: &str,
     api_key: &str,
-    reporter: Box<dyn ProgressReporter>,
+    observer: TauriProgressObserver,
 ) -> Result<String, String> {
     info!("Starting enhanced TTS with detailed logging");
     
@@ -445,50 +428,292 @@ async fn enhanced_tts_with_logging(
         }
     }
     
-    // Create a TTS config with the API key
-    let config = tts_sync::config::TtsSyncConfig {
-        openai_api_key: api_key.to_string(),
-        ..tts_sync::config::TtsSyncConfig::default()
+    // Get video duration from the file
+    let video_duration = match get_video_duration(video_path).await {
+        Ok(duration) => {
+            info!("Video duration: {:.2} seconds", duration);
+            duration
+        },
+        Err(e) => {
+            error!("Failed to get video duration: {}", e);
+            return Err(format!("Failed to get video duration: {}", e));
+        }
     };
-    
-    // Create a TTS sync instance with the reporter
-    let tts_sync = tts_sync::TtsSync::with_progress_reporter(config, reporter);
     
     // Use a detailed try/catch approach to identify where issues occur
     info!("About to start TTS sync process - this is where we often get stuck");
     
-    // Wrap in a timeout to prevent hanging indefinitely
-    let process_future = async {
-        let result = tts_sync.process(
-            video_path,
-            audio_path,
-            original_vtt_path,
-            translated_vtt_path,
-            output_path,
-        ).await;
-        
-        match result {
-            Ok(output_file) => {
-                info!("TTS process completed successfully!");
-                Ok(output_file)
+    // Create a channel to communicate between threads
+    let (tx, mut rx) = mpsc::channel(1);
+    
+    // Clone all the values we need to pass to the thread
+    let translated_vtt_path_clone = translated_vtt_path.to_string();
+    let api_key_clone = api_key.to_string();
+    let output_path_clone = output_path.to_string();
+    let window_clone = observer.window.clone();
+    
+    // Spawn a new thread to run the TTS synchronization
+    thread::spawn(move || {
+        // Create a runtime for the thread
+        match tokio::runtime::Runtime::new() {
+            Ok(rt) => {
+                // Run the TTS synchronization in the runtime
+                rt.block_on(async {
+                    // Create a progress callback
+                    let window = window_clone;
+                    let progress_state = Arc::new(std::sync::Mutex::new(0.0f32));
+                    let progress_callback = Box::new(move |progress: f32, status: &str| {
+                        // Убедимся, что прогресс в диапазоне 0-100
+                        let normalized_progress = progress.max(0.0).min(100.0);
+                        
+                        // Увеличиваем значения прогресса, чтобы гарантировать движение ползунка
+                        // Множитель 1.0 для тестов, но при необходимости его можно изменить
+                        let scaled_progress = normalized_progress * 1.0;
+                        
+                        let should_send = {
+                            // Получаем доступ к предыдущему прогрессу
+                            let mut previous_progress = match progress_state.lock() {
+                                Ok(guard) => guard,
+                                Err(_) => return, // В случае ошибки просто выходим
+                            };
+                            
+                            // Проверяем нужно ли отправлять обновление
+                            let should_update = 
+                                (scaled_progress - *previous_progress).abs() >= 0.5 || 
+                                scaled_progress == 0.0 || scaled_progress >= 99.9 ||
+                                status.contains("завершена");
+                            
+                            // Обновляем значение предыдущего прогресса
+                            if should_update {
+                                *previous_progress = scaled_progress;
+                            }
+                            
+                            should_update
+                        };
+                        
+                        // Отправляем обновления только если нужно
+                        if should_send {
+                            // Парсим информацию о сегментах
+                            let (current_segment, total_segments) = if status.contains("/") {
+                                let parts: Vec<&str> = status.split("/").collect();
+                                if parts.len() >= 2 {
+                                    let current = parts[0].split_whitespace()
+                                        .last()
+                                        .and_then(|num| num.parse::<i32>().ok());
+                                    
+                                    let total = parts[1].split_whitespace()
+                                        .next()
+                                        .and_then(|num| num.parse::<i32>().ok());
+                                    
+                                    (current, total)
+                                } else {
+                                    (None, None)
+                                }
+                            } else {
+                                (None, None)
+                            };
+                            
+                            // Создаем объект прогресса
+                            let progress_json = json!({
+                                "step": "TTS Generation",
+                                "step_progress": scaled_progress,
+                                "total_progress": scaled_progress,
+                                "details": status,
+                                "current_segment": current_segment,
+                                "total_segments": total_segments,
+                                "timestamp": chrono::Utc::now().timestamp_millis(),
+                                "status": status  // явно добавим статус для UI
+                            });
+                            
+                            // Всегда логгируем прогресс для отладки
+                            info!("TTS progress: {:.1}%, status={}", scaled_progress, status);
+                            
+                            // Отправляем событие
+                            if let Err(e) = window.emit("tts-progress", progress_json.clone()) {
+                                error!("Failed to emit TTS progress: {}", e);
+                            }
+                        }
+                    });
+                    
+                    // Create a TTS sync instance with the fluent interface
+                    let tts_sync = TtsSync::default()
+                        .with_progress_callback(progress_callback)
+                        .with_compression(true)
+                        .with_equalization(true)
+                        .with_volume_normalization(true)
+                        .with_preserve_pauses(true);
+                    
+                    info!("Starting TTS synchronization with video duration: {:.2}s", video_duration);
+                    let result = tts_sync.synchronize(
+                        &translated_vtt_path_clone,
+                        video_duration,
+                        &api_key_clone,
+                    ).await;
+                    
+                    match result {
+                        Ok(output_file) => {
+                            info!("TTS process completed successfully!");
+                            info!("Generated TTS output file: {}", output_file);
+                            
+                            // Verify the generated file exists and has content
+                            match tokio::fs::metadata(&output_file).await {
+                                Ok(metadata) => {
+                                    let file_size = metadata.len();
+                                    info!("Generated file size: {} bytes", file_size);
+                                    
+                                    if file_size < 1000 {  // Если файл меньше 1KB, вероятно, он пуст или повреждён
+                                        let error_msg = format!("Generated audio file is too small ({}B): {}", file_size, output_file);
+                                        error!("{}", error_msg);
+                                        let _ = tx.send(Err(error_msg)).await;
+                                        return;
+                                    }
+                                },
+                                Err(e) => {
+                                    let error_msg = format!("Failed to check generated file: {}", e);
+                                    error!("{}", error_msg);
+                                    let _ = tx.send(Err(error_msg)).await;
+                                    return;
+                                }
+                            }
+                            
+                            // Create parent directories for output path
+                            let output_dir = std::path::Path::new(&output_path_clone).parent();
+                            if let Some(dir) = output_dir {
+                                if !dir.exists() {
+                                    if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                                        let error_msg = format!("Failed to create output directory: {}", e);
+                                        error!("{}", error_msg);
+                                        let _ = tx.send(Err(error_msg)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            
+                            // Copy the generated audio file to the output path
+                            info!("Copying from {} to {}", &output_file, &output_path_clone);
+                            match tokio::fs::copy(&output_file, &output_path_clone).await {
+                                Ok(bytes_copied) => {
+                                    info!("Copied TTS output to: {} ({} bytes)", output_path_clone, bytes_copied);
+                                    
+                                    // Verify copied file
+                                    match tokio::fs::metadata(&output_path_clone).await {
+                                        Ok(metadata) => {
+                                            if metadata.len() > 0 {
+                                                info!("Verified output file: {} ({} bytes)", 
+                                                      output_path_clone, metadata.len());
+                                                let _ = tx.send(Ok(output_path_clone.clone())).await;
+                                            } else {
+                                                let error_msg = format!("Output file is empty after copy: {}", output_path_clone);
+                                                error!("{}", error_msg);
+                                                let _ = tx.send(Err(error_msg)).await;
+                                            }
+                                        },
+                                        Err(e) => {
+                                            let error_msg = format!("Failed to verify output file after copy: {}", e);
+                                            error!("{}", error_msg);
+                                            let _ = tx.send(Err(error_msg)).await;
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    error!("Failed to copy TTS output: {}", e);
+                                    let _ = tx.send(Err(format!("Failed to copy TTS output: {}", e))).await;
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            error!("TTS process returned an error: {:?}", e);
+                            let _ = tx.send(Err(format!("TTS error: {:?}", e))).await;
+                        }
+                    }
+                });
             },
             Err(e) => {
-                error!("TTS process returned an error: {:?}", e);
-                Err(format!("TTS error: {:?}", e))
+                let error_msg = format!("Failed to create runtime in TTS thread: {}", e);
+                error!("{}", error_msg);
+                
+                // Don't call await here, just log the error
+                // We'll handle the error with the timeout mechanism
             }
         }
-    };
+    });
     
-    // Add a timeout
+    // Wait for the result from the spawned thread
+    // Add a timeout to prevent hanging indefinitely
     match tokio::time::timeout(
-        std::time::Duration::from_secs(30), // 30 second timeout for testing
-        process_future
+        std::time::Duration::from_secs(600), // 10 minute timeout
+        rx.recv()
     ).await {
-        Ok(result) => result,
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            error!("TTS process channel closed unexpectedly");
+            Err("TTS process failed - channel closed unexpectedly".to_string())
+        },
         Err(_) => {
-            error!("TTS process timed out after 30 seconds");
+            error!("TTS process timed out after 10 minutes");
             Err("TTS process timed out - likely stuck in API request or processing".to_string())
         }
+    }
+}
+
+// Helper function to get video duration
+async fn get_video_duration(video_path: &str) -> Result<f64, String> {
+    use tokio::process::Command;
+    
+    // Using ffprobe to get video duration
+    let output = Command::new("ffprobe")
+        .args([
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute ffprobe: {}", e))?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffprobe error: {}", stderr));
+    }
+    
+    let duration_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    duration_str.parse::<f64>().map_err(|e| format!("Failed to parse duration: {}", e))
+}
+
+// Helper function to copy the generated file to the specified output path
+async fn copy_to_output_path(source: &str, destination: &str) -> Result<(), String> {
+    let dest_path = std::path::Path::new(destination);
+    
+    // Ensure parent directories exist
+    if let Some(parent) = dest_path.parent() {
+        if !parent.exists() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Failed to create parent directories: {}", e))?;
+        }
+    }
+    
+    // Check if destination is a directory
+    if dest_path.exists() && dest_path.is_dir() {
+        // If destination is a directory, append the source filename
+        let source_filename = std::path::Path::new(source)
+            .file_name()
+            .ok_or_else(|| "Source has no filename".to_string())?;
+        
+        let new_dest = dest_path.join(source_filename);
+        info!("Destination is a directory, copying to: {}", new_dest.display());
+        
+        tokio::fs::copy(source, new_dest)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("Failed to copy file: {}", e))
+    } else {
+        // Normal file copy
+        tokio::fs::copy(source, dest_path)
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("Failed to copy file: {}", e))
     }
 }
 
@@ -537,10 +762,32 @@ pub async fn generate_speech(
         }
     }
     
-    // Create progress reporter and observer
-    let mut reporter = DefaultProgressReporter::new();
+    // Ensure the output path is valid
+    let output_path_obj = std::path::Path::new(&output_path);
+    let final_output_path = if output_path_obj.is_dir() {
+        // If output_path is a directory, create a filename based on the input
+        let base_name = std::path::Path::new(&translated_vtt_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "tts_output".to_string());
+        
+        output_path_obj.join(format!("{}_tts.mp4", base_name)).to_string_lossy().to_string()
+    } else {
+        // Make sure parent directories exist
+        if let Some(parent) = output_path_obj.parent() {
+            if !parent.exists() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| format!("Failed to create output directory: {}", e))?;
+            }
+        }
+        output_path.clone()
+    };
+    
+    info!("Final TTS output will be saved to: {}", final_output_path);
+    
+    // Create progress observer
     let observer = TauriProgressObserver::new(window.clone());
-    reporter.add_observer(Box::new(observer));
     
     // Use our enhanced TTS function with detailed logging
     match enhanced_tts_with_logging(
@@ -548,14 +795,14 @@ pub async fn generate_speech(
         &audio_path,
         &original_vtt_path,
         &translated_vtt_path,
-        &output_path,
+        &final_output_path,
         &api_key,
-        Box::new(reporter),
+        observer,
     ).await {
         Ok(_) => {
             info!("TTS generation completed successfully");
             Ok(TTSResult {
-                audio_path: output_path,
+                audio_path: final_output_path,
             })
         },
         Err(e) => {
@@ -684,7 +931,13 @@ pub async fn process_video(
         .await
         .map_err(|e| format!("Failed to create final directory: {}", e))?;
     
-    let final_output = final_dir.join("final_output.mp4");
+    // Use a filename, not just a directory
+    let original_filename = std::path::Path::new(&download_result.video_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "video".to_string());
+    
+    let final_output = final_dir.join(format!("{}_final.mp4", original_filename));
     info!("Final output will be saved to: {}", final_output.display());
 
     let tts_result = generate_speech(
@@ -702,6 +955,25 @@ pub async fn process_video(
         format!("TTS generation and synchronization failed: {}", e)
     })?;
 
+    // Verify the output file was created
+    let final_file_path = std::path::Path::new(&tts_result.audio_path);
+    if !final_file_path.exists() {
+        let error_msg = format!("Final output file was not created: {}", tts_result.audio_path);
+        error!("{}", error_msg);
+        return Err(error_msg);
+    }
+    
+    let final_file_size = tokio::fs::metadata(final_file_path).await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    
+    if final_file_size == 0 {
+        let error_msg = format!("Final output file is empty: {}", tts_result.audio_path);
+        error!("{}", error_msg);
+        return Err(error_msg);
+    }
+    
+    info!("Final file size: {} bytes", final_file_size);
     info!("=== Video Processing Pipeline Completed Successfully ===");
     info!("Final video saved to: {}", tts_result.audio_path);
 
