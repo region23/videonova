@@ -1,12 +1,10 @@
 use anyhow::{anyhow, Result};
-use log::{debug, info, warn, error};
-use reqwest::multipart::{Form, Part};
+use log::{info, error};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
-use tokio_util::codec::{BytesCodec, FramedRead};
 use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -15,7 +13,8 @@ pub struct TranscriptionProgress {
     pub progress: f32,
 }
 
-// Создание формы для запроса к OpenAI API
+// Добавляем атрибут #[allow(dead_code)] к неиспользуемым вариантам enum
+#[allow(dead_code)]
 pub enum ResponseFormat {
     Json,
     Text,
@@ -58,6 +57,8 @@ impl MultipartFormBuilder {
         }
     }
 
+    // Добавляем атрибут #[allow(dead_code)] к неиспользуемой функции
+    #[allow(dead_code)]
     fn with_boundary(boundary: &str) -> Self {
         Self {
             boundary: boundary.to_string(),
@@ -96,8 +97,6 @@ impl MultipartFormBuilder {
     fn content_type(&self) -> String {
         format!("multipart/form-data; boundary={}", self.boundary)
     }
-
-    
 }
 
 pub async fn transcribe_audio(

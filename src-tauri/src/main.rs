@@ -8,7 +8,6 @@ use tauri_plugin_store::StoreExt;
 
 mod commands;
 mod utils;
-extern crate tts_sync;
 
 fn main() {
     // Инициализируем логгер с тонкой настройкой

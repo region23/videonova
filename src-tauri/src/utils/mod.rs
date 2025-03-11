@@ -4,3 +4,4 @@ pub mod transcribe;
 pub mod logger;
 pub mod common;
 pub mod translate;
+pub mod tts;

@@ -16,7 +16,11 @@ use zip;
 pub struct ExternalTool {
     pub name: String,
     pub path: PathBuf,
+    #[allow(dead_code)]
+    pub description: String,
+    #[allow(dead_code)]
     pub version: Option<Version>,
+    #[allow(dead_code)]
     pub min_version: Version,
 }
 
@@ -54,6 +58,7 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
                 initialized_tools.push(ExternalTool {
                     name: "ffmpeg".to_string(),
                     path: path.clone(),
+                    description: "".to_string(),
                     version: Some(version.clone()),
                     min_version: Version::new(4, 0, 0),
                 });
@@ -72,6 +77,7 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
                 initialized_tools.push(ExternalTool {
                     name: "ffmpeg".to_string(),
                     path: downloaded_path.clone(),
+                    description: "".to_string(),
                     version: Some(version.clone()),
                     min_version: Version::new(4, 0, 0),
                 });
@@ -91,6 +97,7 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
             initialized_tools.push(ExternalTool {
                 name: "ffmpeg".to_string(),
                 path: downloaded_path.clone(),
+                description: "".to_string(),
                 version: Some(version.clone()),
                 min_version: Version::new(4, 0, 0),
             });
@@ -107,6 +114,7 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
                 initialized_tools.push(ExternalTool {
                     name: "yt-dlp".to_string(),
                     path: path.clone(),
+                    description: "".to_string(),
                     version: Some(version.clone()),
                     min_version: Version::new(23, 11, 0),
                 });
@@ -125,6 +133,7 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
                 initialized_tools.push(ExternalTool {
                     name: "yt-dlp".to_string(),
                     path: downloaded_path.clone(),
+                    description: "".to_string(),
                     version: Some(version.clone()),
                     min_version: Version::new(23, 11, 0),
                 });
@@ -144,6 +153,7 @@ pub async fn init_tools(progress_sender: Option<mpsc::Sender<(String, f32)>>) ->
             initialized_tools.push(ExternalTool {
                 name: "yt-dlp".to_string(),
                 path: downloaded_path.clone(),
+                description: "".to_string(),
                 version: Some(version.clone()),
                 min_version: Version::new(23, 11, 0),
             });

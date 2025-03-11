@@ -42,6 +42,7 @@ symphonia = { version = "0.5", features = ["mp3", "aac", "wav", "pcm"] }
 rubato = "0.14"
 dasp = { version = "0.11", features = ["signal", "interpolate", "window"] }
 webrtc-vad = "0.4"
+hound = "3.5"
 
 # Многопоточность и параллелизм
 rayon = "1.7"
@@ -56,8 +57,7 @@ uuid = { version = "1.3", features = ["v4"] }
 # Время и даты (новая зависимость для системы прогресса)
 chrono = "0.4"
 
-# TTS library
-tts-sync = { git = "https://github.com/region23/tts-sync.git" }
+# TTS library - removed since we're using our own implementation
 
 [dev-dependencies]
 criterion = "0.5"
