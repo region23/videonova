@@ -1,10 +1,9 @@
-use crate::utils::common::check_file_exists_and_valid;
-use anyhow::{Result, anyhow};
-use log::{debug, error, info, warn};
+use anyhow::Result;
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
@@ -12,7 +11,6 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
-use which;
 
 /// Structure for holding merge progress information
 #[derive(Clone, Serialize, Deserialize)]
@@ -329,6 +327,8 @@ pub async fn merge_files(
         .arg(format!("language={}", target_language_code))
         .arg("-metadata:s:a:0")
         .arg(format!("title={} Audio", target_language_name))
+        .arg("-disposition:a:0")
+        .arg("default")
         // Second audio track (original)
         .arg("-metadata:s:a:1")
         .arg(format!("language={}", source_language_code))

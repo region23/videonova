@@ -12,11 +12,12 @@ use tokio::sync::mpsc;
 use serde_json::json;
 use std::path::Path;
 use crate::utils::tts::tts::{synchronizer::{SyncConfig, process_sync}, ProgressUpdate, TtsConfig, AudioProcessingConfig};
-
 use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
+use crate::utils::merge::{self, MergeProgress};
 use crate::utils::transcribe;
 use crate::utils::translate;
 use crate::utils::youtube::{self, DownloadProgress, VideoInfo};
+use crate::utils::tts::tts::soundtouch;
 
 #[derive(Clone, Serialize)]
 pub struct DownloadState {
@@ -56,6 +57,12 @@ pub struct ProcessVideoResult {
     translation_path: String,
     tts_path: String,
     final_path: String,
+    merged_path: String,
+}
+
+#[derive(Serialize)]
+pub struct MergeResult {
+    merged_video_path: String,
 }
 
 /// Get information about a YouTube video
@@ -525,7 +532,7 @@ async fn enhanced_tts_with_logging(
                                     "details": status,
                                     "current_segment": current,
                                     "total_segments": total,
-                                    "timestamp": chrono::Utc::now().timestamp_millis(),
+                                    "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64,
                                     "status": status  // явно добавим статус для UI
                                 });
                                 
@@ -554,8 +561,6 @@ async fn enhanced_tts_with_logging(
                     
                     // Create audio processing configuration with sensible defaults
                     let audio_config = AudioProcessingConfig {
-                        fade_ms: 50,
-                        min_slowdown_factor: 0.9,
                         window_size: 4096,
                         hop_size: 1024,
                         target_peak_level: 0.8,
@@ -734,6 +739,14 @@ pub async fn generate_speech(
         }
     }
     
+    // Проверяем наличие SoundTouch библиотеки перед тем, как начать TTS процесс
+    info!("Checking SoundTouch installation before starting TTS process");
+    if let Err(e) = soundtouch::ensure_soundtouch_installed() {
+        error!("SoundTouch installation check failed: {}", e);
+        return Err(format!("SoundTouch library is not available: {}. Please ensure that SoundTouch is installed on your system.", e));
+    }
+    info!("SoundTouch is available, proceeding with TTS generation");
+    
     // Validate input files
     for (path, desc) in [
         (&video_path, "video"),
@@ -749,27 +762,17 @@ pub async fn generate_speech(
     
     // Ensure the output path is valid
     let output_path_obj = std::path::Path::new(&output_path);
-    let final_output_path = if output_path_obj.is_dir() {
-        // If output_path is a directory, create a filename based on the input
-        let base_name = std::path::Path::new(&translated_vtt_path)
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "tts_output".to_string());
-        
-        output_path_obj.join(format!("{}_tts.mp4", base_name)).to_string_lossy().to_string()
-    } else {
-        // Make sure parent directories exist
-        if let Some(parent) = output_path_obj.parent() {
-            if !parent.exists() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| format!("Failed to create output directory: {}", e))?;
-            }
-        }
-        output_path.clone()
-    };
     
-    info!("Final TTS output will be saved to: {}", final_output_path);
+    // Make sure parent directories exist if output_path is a full file path
+    if let Some(parent) = output_path_obj.parent() {
+        if !parent.exists() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Failed to create output directory: {}", e))?;
+        }
+    }
+    
+    info!("TTS output will be saved to: {}", output_path);
     
     // Create progress observer
     let observer = TauriProgressObserver::new(window.clone());
@@ -780,14 +783,14 @@ pub async fn generate_speech(
         &audio_path,
         &original_vtt_path,
         &translated_vtt_path,
-        &final_output_path,
+        &output_path,
         &api_key,
         observer,
     ).await {
         Ok(_) => {
             info!("TTS generation completed successfully");
             Ok(TTSResult {
-                audio_path: final_output_path,
+                audio_path: output_path,
             })
         },
         Err(e) => {
@@ -910,27 +913,28 @@ pub async fn process_video(
     // Step 4: Generate TTS and synchronize with video
     info!("Step 4: Generating speech and synchronizing with video");
     
-    // Создаем отдельную директорию для финального результата
-    let final_dir = PathBuf::from(&output_path).join("final");
-    tokio::fs::create_dir_all(&final_dir)
+    // Create a dedicated TTS directory for intermediate audio files
+    let tts_dir = PathBuf::from(&output_path).join("tts");
+    tokio::fs::create_dir_all(&tts_dir)
         .await
-        .map_err(|e| format!("Failed to create final directory: {}", e))?;
+        .map_err(|e| format!("Failed to create TTS directory: {}", e))?;
     
-    // Use a filename, not just a directory
+    // Use a filename with correct .wav extension in the tts subdirectory
     let original_filename = std::path::Path::new(&download_result.video_path)
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "video".to_string());
     
-    let final_output = final_dir.join(format!("{}_final.mp4", original_filename));
-    info!("Final output will be saved to: {}", final_output.display());
+    // Save to tts subdirectory with .wav extension
+    let tts_output = tts_dir.join(format!("{}_tts.wav", original_filename));
+    info!("TTS output will be saved to: {}", tts_output.display());
 
     let tts_result = generate_speech(
         download_result.video_path.clone(),
         download_result.audio_path.clone(),
         transcription_result.vtt_path.clone(),
         translation_result.translated_vtt_path.clone(),
-        final_output.to_string_lossy().to_string(),
+        tts_output.to_string_lossy().to_string(),
         api_key.clone(),
         window.clone(),
     )
@@ -941,26 +945,80 @@ pub async fn process_video(
     })?;
 
     // Verify the output file was created
-    let final_file_path = std::path::Path::new(&tts_result.audio_path);
-    if !final_file_path.exists() {
-        let error_msg = format!("Final output file was not created: {}", tts_result.audio_path);
+    let tts_file_path = std::path::Path::new(&tts_result.audio_path);
+    if !tts_file_path.exists() {
+        let error_msg = format!("TTS output file was not created: {}", tts_result.audio_path);
+        error!("{}", error_msg);
+        return Err(error_msg);
+    }
+
+    // Check file size
+    let tts_file_size = tokio::fs::metadata(tts_file_path).await
+        .map(|m| m.len())
+        .map_err(|e| format!("Failed to get file size: {}", e))?;
+
+    if tts_file_size == 0 {
+        let error_msg = format!("TTS output file is empty: {}", tts_result.audio_path);
+        error!("{}", error_msg);
+        return Err(error_msg);
+    }
+
+    info!("TTS file size: {} bytes", tts_file_size);
+    
+    // Step 5: Merge everything together
+    info!("Step 5: Merging video, audio, and subtitles");
+    
+    // Create a merged directory
+    let merged_dir = PathBuf::from(&output_path).join("merged");
+    tokio::fs::create_dir_all(&merged_dir)
+        .await
+        .map_err(|e| format!("Failed to create merged directory: {}", e))?;
+    
+    // We need to determine source language code from transcription
+    let source_language_code = "auto"; // Default, should be obtained from transcription if available
+    let source_language_name = "Original"; // Default
+    
+    let merge_result = merge_video(
+        download_result.video_path.clone(),
+        tts_result.audio_path.clone(), // Use the TTS result as the translated audio
+        download_result.audio_path.clone(),
+        transcription_result.vtt_path.clone(),
+        translation_result.translated_vtt_path.clone(),
+        merged_dir.to_string_lossy().to_string(),
+        source_language_code.to_string(),
+        target_language.clone(),
+        source_language_name.to_string(),
+        target_language_name.clone(),
+        window.clone(),
+    )
+    .await
+    .map_err(|e| {
+        error!("Merging failed: {}", e);
+        format!("Merging failed: {}", e)
+    })?;
+    
+    // Verify the merged file was created
+    let merged_file_path = std::path::Path::new(&merge_result.merged_video_path);
+    if !merged_file_path.exists() {
+        let error_msg = format!("Merged output file was not created: {}", merge_result.merged_video_path);
         error!("{}", error_msg);
         return Err(error_msg);
     }
     
-    let final_file_size = tokio::fs::metadata(final_file_path).await
+    let merged_file_size = tokio::fs::metadata(merged_file_path).await
         .map(|m| m.len())
         .unwrap_or(0);
     
-    if final_file_size == 0 {
-        let error_msg = format!("Final output file is empty: {}", tts_result.audio_path);
+    if merged_file_size == 0 {
+        let error_msg = format!("Merged output file is empty: {}", merge_result.merged_video_path);
         error!("{}", error_msg);
         return Err(error_msg);
     }
     
-    info!("Final file size: {} bytes", final_file_size);
+    info!("Merged file size: {} bytes", merged_file_size);
     info!("=== Video Processing Pipeline Completed Successfully ===");
     info!("Final video saved to: {}", tts_result.audio_path);
+    info!("Merged video saved to: {}", merge_result.merged_video_path);
 
     Ok(ProcessVideoResult {
         video_path: download_result.video_path,
@@ -968,6 +1026,74 @@ pub async fn process_video(
         transcription_path: transcription_result.vtt_path,
         translation_path: translation_result.translated_vtt_path,
         tts_path: tts_result.audio_path.clone(),
-        final_path: tts_result.audio_path,
+        final_path: tts_result.audio_path,  // Используем tts_result вместо final_output
+        merged_path: merge_result.merged_video_path,
+    })
+}
+
+/// Merge video with translated audio, original audio, and subtitles
+pub async fn merge_video(
+    video_path: String,
+    translated_audio_path: String,
+    original_audio_path: String,
+    original_vtt_path: String,
+    translated_vtt_path: String,
+    output_dir: String,
+    source_language_code: String,
+    target_language_code: String,
+    source_language_name: String,
+    target_language_name: String,
+    window: tauri::Window,
+) -> Result<MergeResult, String> {
+    info!("Starting video merging process");
+    
+    let (progress_tx, mut progress_rx) = mpsc::channel::<MergeProgress>(32);
+    
+    // Clone window for progress updates
+    let window_clone = window.clone();
+    
+    // Spawn a task to forward progress updates to the frontend
+    tokio::spawn(async move {
+        while let Some(progress) = progress_rx.recv().await {
+            let _ = window_clone.emit("merge_progress", json!({
+                "status": progress.status,
+                "progress": progress.progress,
+            }));
+        }
+    });
+    
+    // Convert paths to Path objects
+    let video_path = Path::new(&video_path);
+    let translated_audio_path = Path::new(&translated_audio_path);
+    let original_audio_path = Path::new(&original_audio_path); 
+    let original_vtt_path = Path::new(&original_vtt_path);
+    let translated_vtt_path = Path::new(&translated_vtt_path);
+    let output_dir = Path::new(&output_dir);
+    
+    // Call the merge_files function
+    let result = merge::merge_files(
+        video_path,
+        translated_audio_path,
+        original_audio_path,
+        original_vtt_path,
+        translated_vtt_path,
+        output_dir,
+        &source_language_code,
+        &target_language_code,
+        &source_language_name,
+        &target_language_name,
+        Some(progress_tx),
+    )
+    .await
+    .map_err(|e| {
+        error!("Merging failed: {}", e);
+        format!("Merging failed: {}", e)
+    })?;
+    
+    info!("Merging completed successfully");
+    info!("  Merged video path: {}", result.display());
+    
+    Ok(MergeResult {
+        merged_video_path: result.to_string_lossy().to_string(),
     })
 }
