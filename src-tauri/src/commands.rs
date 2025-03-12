@@ -108,7 +108,6 @@ pub async fn transcribe_audio(
     output_path: String,
     api_key: String,
     language: Option<String>,
-    use_word_timestamps: Option<bool>,
     window: tauri::Window,
 ) -> Result<TranscriptionResult, String> {
     // Create progress channel
@@ -135,15 +134,8 @@ pub async fn transcribe_audio(
     let audio_file = PathBuf::from(audio_path);
     let output_dir = PathBuf::from(output_path);
 
-    // Convert boolean flag to TimestampGranularity
-    let timestamp_granularity = if use_word_timestamps.unwrap_or(false) {
-        Some(transcribe::TimestampGranularity::Word)
-    } else {
-        None
-    };
-
     let result_path =
-        transcribe::transcribe_audio(&audio_file, &output_dir, &api_key, language, Some(tx), timestamp_granularity)
+        transcribe::transcribe_audio(&audio_file, &output_dir, &api_key, language, Some(tx))
             .await
             .map_err(|e| e.to_string())?;
 
@@ -449,7 +441,7 @@ async fn enhanced_tts_with_logging(
                     // Create TTS configuration with sensible defaults
                     let tts_config = TtsConfig {
                         model: "tts-1-hd".to_string(),
-                        voice: "alloy".to_string(),
+                        voice: "onyx".to_string(),
                         speed: 1.0,
                     };
                     
@@ -458,6 +450,7 @@ async fn enhanced_tts_with_logging(
                         window_size: 4096,
                         hop_size: 1024,
                         target_peak_level: 0.8,
+                        voice_to_instrumental_ratio: 0.6,
                     };
                     
                     // Create the sync configuration
@@ -752,7 +745,6 @@ pub async fn process_video(
         output_path.clone(),
         api_key.clone(),
         None, // language - auto detect
-        Some(true), // use_word_timestamps - enable word-level timestamps
         window.clone(),
     )
     .await {

@@ -288,11 +288,10 @@ pub async fn merge_files(
         .arg(&original_ass)
         .arg("-i")
         .arg(&translated_ass)
-        // Map streams in the correct order
         .arg("-map")
         .arg("0:v") // Video stream
         .arg("-map")
-        .arg("1:a") // First audio track: Translated
+        .arg("1:a") // First audio track: Translated + Instrumental (final_mixed.wav)
         .arg("-map")
         .arg("2:a") // Second audio track: Original
         .arg("-map")
@@ -316,41 +315,42 @@ pub async fn merge_files(
         // Subtitle settings
         .arg("-c:s")
         .arg("mov_text")
-        // Create mixed audio track and add as third audio stream
-        .arg("-filter_complex")
-        .arg("[1:a]volume=1.2[ta];[2:a]volume=0.05[oa];[ta][oa]amix=inputs=2:normalize=1[a]")
-        .arg("-map")
-        .arg("[a]")
-        // Set metadata for all audio tracks
-        // First audio track (translated)
+        .arg("-disposition:s:0")
+        .arg("none")
+        .arg("-disposition:s:1")
+        .arg("none")
+        // Set metadata for audio tracks
+        // First audio track (translated + instrumental)
         .arg("-metadata:s:a:0")
-        .arg(format!("language={}", target_language_code))
+        .arg(format!("language={}", convert_to_iso_639_2(target_language_code)))
         .arg("-metadata:s:a:0")
         .arg(format!("title={} Audio", target_language_name))
+        .arg("-metadata:s:a:0")
+        .arg("handler_name=Audio Track (Translated)")
         .arg("-disposition:a:0")
         .arg("default")
         // Second audio track (original)
         .arg("-metadata:s:a:1")
-        .arg(format!("language={}", source_language_code))
+        .arg(format!("language={}", convert_to_iso_639_2(source_language_code)))
         .arg("-metadata:s:a:1")
         .arg(format!("title={} Audio", source_language_name))
-        // Third audio track (mixed)
-        .arg("-metadata:s:a:2")
-        .arg(format!("language={}", target_language_code))
-        .arg("-metadata:s:a:2")
-        .arg(format!(
-            "title={} Audio + {} Background",
-            target_language_name, source_language_name
-        ))
-        // Subtitle metadata remains the same
+        .arg("-metadata:s:a:1")
+        .arg("handler_name=Audio Track (Original)")
+        .arg("-disposition:a:1")
+        .arg("none")
+        // Subtitle metadata
         .arg("-metadata:s:s:0")
-        .arg(format!("language={}", source_language_code))
+        .arg(format!("language={}", convert_to_iso_639_2(source_language_code)))
         .arg("-metadata:s:s:0")
         .arg(format!("title={} Subtitles", source_language_name))
+        .arg("-metadata:s:s:0")
+        .arg("handler_name=Subtitles (Original)")
         .arg("-metadata:s:s:1")
-        .arg(format!("language={}", target_language_code))
+        .arg(format!("language={}", convert_to_iso_639_2(target_language_code)))
         .arg("-metadata:s:s:1")
         .arg(format!("title={} Subtitles", target_language_name))
+        .arg("-metadata:s:s:1")
+        .arg("handler_name=Subtitles (Translated)")
         .arg(&output_path);
 
     log::info!("Executing ffmpeg command: {:?}", cmd);
@@ -408,4 +408,22 @@ pub async fn merge_files(
     }
 
     Ok(output_path)
+}
+
+/// Convert ISO 639-1 two-letter language code to ISO 639-2 three-letter code
+fn convert_to_iso_639_2(code: &str) -> String {
+    match code {
+        "en" => "eng",
+        "ru" => "rus",
+        "es" => "spa",
+        "fr" => "fra",
+        "de" => "deu",
+        "it" => "ita",
+        "pt" => "por",
+        "ja" => "jpn",
+        "ko" => "kor",
+        "zh" => "zho",
+        // Add more mappings as needed
+        _ => code, // Return original code if no mapping found
+    }.to_string()
 }
