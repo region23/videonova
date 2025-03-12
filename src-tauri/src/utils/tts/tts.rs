@@ -909,14 +909,16 @@ pub mod synchronizer {
             // Обрабатываем результат генерации TTS
             let (audio_bytes, text) = tts_result.1?;
             
-            // Сохраняем MP3-чанк на диск для отладки
-            let sanitized_text = text.chars()
-                .map(|c| if c.is_alphanumeric() || c == ' ' { c } else { '_' })
-                .collect::<String>()
-                .trim()
+            // Получаем имя видео из пути к выходному файлу
+            let base_filename = config.output_wav
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output")
                 .to_string();
             
-            let chunk_name = format!("chunk_{:03}_{}", i, sanitized_text);
+            // Формируем имя файла без текста субтитров - только номер чанка и имя видео
+            let chunk_name = format!("chunk_{:03}_{}", i, base_filename);
+            
             let chunk_path = debug_dir.join(format!("{}.mp3", chunk_name));
             std::fs::write(&chunk_path, &audio_bytes)
                 .map_err(|e| TtsError::IoError(e))?;

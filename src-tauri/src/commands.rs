@@ -222,6 +222,7 @@ pub async fn transcribe_audio(
     output_path: String,
     api_key: String,
     language: Option<String>,
+    use_word_timestamps: Option<bool>,
     window: tauri::Window,
 ) -> Result<TranscriptionResult, String> {
     // Create progress channel
@@ -248,8 +249,15 @@ pub async fn transcribe_audio(
     let audio_file = PathBuf::from(audio_path);
     let output_dir = PathBuf::from(output_path);
 
+    // Convert boolean flag to TimestampGranularity
+    let timestamp_granularity = if use_word_timestamps.unwrap_or(false) {
+        Some(transcribe::TimestampGranularity::Word)
+    } else {
+        None
+    };
+
     let result_path =
-        transcribe::transcribe_audio(&audio_file, &output_dir, &api_key, language, Some(tx))
+        transcribe::transcribe_audio(&audio_file, &output_dir, &api_key, language, Some(tx), timestamp_granularity)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -853,6 +861,7 @@ pub async fn process_video(
         output_path.clone(),
         api_key.clone(),
         None, // language - auto detect
+        Some(true), // use_word_timestamps - enable word-level timestamps
         window.clone(),
     )
     .await
