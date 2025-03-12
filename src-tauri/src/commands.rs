@@ -55,6 +55,7 @@ pub struct ProcessVideoResult {
 #[derive(Serialize)]
 pub struct MergeResult {
     merged_video_path: String,
+    output_dir: String,
 }
 
 #[derive(Debug)]
@@ -89,7 +90,7 @@ pub async fn download_video(
     let window_clone = window.clone();
     tokio::spawn(async move {
         while let Some(progress) = rx.recv().await {
-            if let Err(e) = window_clone.emit("download_progress", progress) {
+            if let Err(e) = window_clone.emit("download-progress", progress) {
                 error!("Failed to emit progress: {}", e);
             }
         }
@@ -362,30 +363,56 @@ async fn enhanced_tts_with_logging(
                     
                     // Spawn a task to handle progress updates from the TTS library
                     let progress_task = tokio::spawn(async move {
+                        // Add a tracked highest progress value to prevent decreases
+                        let mut highest_progress = 0.0f32;
+                        
                         while let Some(update) = progress_rx.recv().await {
                             let (progress, status, current, total) = match &update {
-                                ProgressUpdate::Started => (0.0, "Начало обработки TTS".to_string(), None, None),
-                                ProgressUpdate::ParsingVTT => (5.0, "Парсинг VTT файла".to_string(), None, None),
-                                ProgressUpdate::ParsedVTT { total } => (10.0, format!("Найдено {} реплик", total), None, Some(*total as i32)),
+                                ProgressUpdate::Started => (0.0, "Подготовка TTS".to_string(), None, None),
+                                ProgressUpdate::ParsingVTT => (5.0, "Анализ субтитров".to_string(), None, None),
+                                ProgressUpdate::ParsedVTT { total } => (10.0, "Субтитры готовы".to_string(), None, Some(*total as i32)),
                                 ProgressUpdate::TTSGeneration { current, total } => {
-                                    let progress = 10.0 + 50.0 * (*current as f32 / *total as f32);
-                                    (progress, format!("Генерация TTS {}/{}", current, total), Some(*current as i32), Some(*total as i32))
+                                    // Reduce the TTS generation range to leave room for vocal removal and mixing
+                                    let progress = 10.0 + 40.0 * (*current as f32 / *total as f32);
+                                    (progress, format!("Генерация TTS"), Some(*current as i32), Some(*total as i32))
                                 },
                                 ProgressUpdate::ProcessingFragment { index, total, step } => {
-                                    let progress = 60.0 + 30.0 * (*index as f32 / *total as f32);
-                                    (progress, format!("Обработка фрагмента {}/{}: {}", index, total, step), Some(*index as i32), Some(*total as i32))
+                                    // Limit detailed step information
+                                    let simplified_step = if step.contains("Удаление вокала") {
+                                        "Удаление вокала"
+                                    } else if step.contains("Длительность") {
+                                        "Обработка аудио"
+                                    } else {
+                                        &step
+                                    };
+                                    
+                                    // For vocal removal specifically, make it finish at 85%
+                                    let progress = if step.contains("Удаление вокала") {
+                                        // Remap to 50-85%
+                                        50.0 + 35.0 * (*index as f32 / *total as f32)
+                                    } else {
+                                        // Remap all other processing to go from 60% to 90% 
+                                        60.0 + 30.0 * (*index as f32 / *total as f32)
+                                    };
+                                    
+                                    (progress, format!("Обработка аудио"), Some(*index as i32), Some(*total as i32))
                                 },
-                                ProgressUpdate::MergingFragments => (90.0, "Склейка аудиофрагментов".to_string(), None, None),
-                                ProgressUpdate::Normalizing { using_original } => {
-                                    let src = if *using_original { "исходный файл" } else { "целевой уровень" };
-                                    (95.0, format!("Нормализация громкости (используя {})", src), None, None)
-                                },
-                                ProgressUpdate::Encoding => (98.0, "Кодирование в WAV".to_string(), None, None),
-                                ProgressUpdate::Finished => (100.0, "Обработка TTS завершена".to_string(), None, None),
+                                ProgressUpdate::MergingFragments => (90.0, "Формирование результата".to_string(), None, None),
+                                ProgressUpdate::Normalizing { using_original } => (95.0, "Нормализация громкости".to_string(), None, None),
+                                ProgressUpdate::Encoding => (98.0, "Сохранение результата".to_string(), None, None),
+                                ProgressUpdate::Finished => (100.0, "TTS готов".to_string(), None, None),
                             };
                             
                             // Убедимся, что прогресс в диапазоне 0-100
-                            let normalized_progress = progress.max(0.0).min(100.0);
+                            let mut normalized_progress = progress.max(0.0).min(100.0);
+                            
+                            // Never decrease progress (except for new starts)
+                            if normalized_progress < highest_progress && normalized_progress > 1.0 {
+                                info!("Prevented progress decrease: {} -> {}", normalized_progress, highest_progress);
+                                normalized_progress = highest_progress;
+                            } else if normalized_progress > highest_progress {
+                                highest_progress = normalized_progress;
+                            }
                             
                             let should_send = {
                                 // Получаем доступ к предыдущему прогрессу
@@ -394,11 +421,11 @@ async fn enhanced_tts_with_logging(
                                     Err(_) => return, // В случае ошибки просто выходим
                                 };
                                 
-                                // Проверяем нужно ли отправлять обновление
+                                // Only send updates if progress has increased and exceeds a threshold, or for important status changes
                                 let should_update = 
-                                    (normalized_progress - *previous_progress).abs() >= 0.5 || 
+                                    (normalized_progress > *previous_progress && normalized_progress - *previous_progress >= 0.5) || 
                                     normalized_progress == 0.0 || normalized_progress >= 99.9 ||
-                                    status.contains("завершена");
+                                    status.contains("готов");
                                 
                                 // Обновляем значение предыдущего прогресса
                                 if should_update {
@@ -419,7 +446,8 @@ async fn enhanced_tts_with_logging(
                                     "current_segment": current,
                                     "total_segments": total,
                                     "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64,
-                                    "status": status  // явно добавим статус для UI
+                                    "status": status,  // явно добавим статус для UI
+                                    "progress": normalized_progress  // Явно добавляем поле progress для совместимости с интерфейсом прогресса
                                 });
                                 
                                 // Всегда логгируем прогресс для отладки
@@ -441,7 +469,7 @@ async fn enhanced_tts_with_logging(
                     // Create TTS configuration with sensible defaults
                     let tts_config = TtsConfig {
                         model: "tts-1-hd".to_string(),
-                        voice: "onyx".to_string(),
+                        voice: "ash".to_string(),
                         speed: 1.0,
                     };
                     
@@ -864,16 +892,21 @@ pub async fn process_video(
     })?;
 
     info!("=== Video Processing Pipeline Completed Successfully ===");
-    info!("Final video saved to: {}", tts_result.audio_path);
-    info!("Merged video saved to: {}", merge_result.merged_video_path);
+    info!("Final video saved to: {}", merge_result.merged_video_path);
+    info!("Output directory: {}", merge_result.output_dir);
+    info!("TTS audio saved to: {}", tts_result.audio_path);
+
+    // Emit merge-complete event before returning
+    window.emit("merge-complete", &merge_result)
+        .map_err(|e| format!("Failed to emit merge-complete event: {}", e))?;
 
     Ok(ProcessVideoResult {
         video_path: download_result.0, // video_path
         audio_path: download_result.1, // audio_path
         transcription_path: transcription_result.vtt_path,
         translation_path: translation_result.translated_vtt_path,
-        tts_path: tts_result.audio_path.clone(),
-        final_path: tts_result.audio_path,
+        tts_path: tts_result.audio_path,
+        final_path: merge_result.merged_video_path.clone(),
         merged_path: merge_result.merged_video_path,
     })
 }
@@ -902,9 +935,13 @@ pub async fn merge_video(
     // Spawn a task to forward progress updates to the frontend
     tokio::spawn(async move {
         while let Some(progress) = progress_rx.recv().await {
-            let _ = window_clone.emit("merge_progress", json!({
+            let _ = window_clone.emit("merge-progress", json!({
                 "status": progress.status,
                 "progress": progress.progress,
+                // Add additional fields to ensure compatibility with UI
+                "step": "Video Merging",
+                "step_progress": progress.progress,
+                "total_progress": progress.progress
             }));
         }
     });
@@ -915,7 +952,7 @@ pub async fn merge_video(
     let original_audio_path = Path::new(&original_audio_path); 
     let original_vtt_path = Path::new(&original_vtt_path);
     let translated_vtt_path = Path::new(&translated_vtt_path);
-    let output_dir = Path::new(&output_dir);
+    let output_dir_path = Path::new(&output_dir);
     
     // Call the merge_files function
     let result = merge::merge_files(
@@ -924,7 +961,7 @@ pub async fn merge_video(
         original_audio_path,
         original_vtt_path,
         translated_vtt_path,
-        output_dir,
+        output_dir_path,
         &source_language_code,
         &target_language_code,
         &source_language_name,
@@ -942,6 +979,7 @@ pub async fn merge_video(
     
     Ok(MergeResult {
         merged_video_path: result.to_string_lossy().to_string(),
+        output_dir: output_dir,
     })
 }
 

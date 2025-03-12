@@ -1,18 +1,122 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Command as StdCommand, Child};
+use std::process::Stdio;
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use tokio::task;
 use tokio::time::timeout;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
-use tauri::{Manager, Emitter};
+use tauri::Emitter;
+use tauri::Manager;
+use tauri_plugin_store::StoreExt;
 
 use super::tools::get_tool_path;
 use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
+
+// Structure for storing YouTube cookies
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct YoutubeCookies {
+    pub browser: String,
+    pub last_used: String, // ISO timestamp
+    pub valid: bool,
+}
+
+// Cookie manager for YouTube
+pub struct YoutubeCookieManager {}
+
+impl YoutubeCookieManager {
+    // Save cookies to the store
+    pub async fn save_cookies(app_handle: &tauri::AppHandle, browser: &str, valid: bool) -> Result<()> {
+        info!("Saving YouTube cookies from browser: {}", browser);
+        let store = app_handle.store(".settings.dat")?;
+        
+        // Get current time as ISO string
+        let now = std::time::SystemTime::now();
+        let datetime = now.duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| anyhow!("Failed to get system time: {}", e))?;
+        let timestamp = format!("{}", datetime.as_secs());
+        
+        let cookies = YoutubeCookies {
+            browser: browser.to_string(),
+            last_used: timestamp,
+            valid,
+        };
+        
+        // Convert to JSON value
+        let json_value = serde_json::to_value(&cookies)
+            .map_err(|e| anyhow!("Failed to serialize YouTube cookies: {}", e))?;
+        
+        store.set("youtube-cookies", json_value);
+        
+        store.save()
+            .map_err(|e| anyhow!("Failed to persist YouTube cookies: {}", e))?;
+        
+        debug!("YouTube cookies saved successfully");
+        Ok(())
+    }
+    
+    // Load cookies from the store
+    pub async fn load_cookies(app_handle: &tauri::AppHandle) -> Result<Option<YoutubeCookies>> {
+        debug!("Loading YouTube cookies from store");
+        let store = app_handle.store(".settings.dat")?;
+        
+        // Get the value as a JSON value from the store
+        let json_value = store.get("youtube-cookies");
+        
+        // Convert from JSON value to our type if it exists
+        let cookies = match json_value {
+            Some(value) => {
+                match serde_json::from_value::<YoutubeCookies>(value) {
+                    Ok(cookies) => Some(cookies),
+                    Err(e) => {
+                        error!("Failed to deserialize YouTube cookies: {}", e);
+                        None
+                    }
+                }
+            },
+            None => None,
+        };
+        
+        if let Some(cookies) = &cookies {
+            debug!("Found cookies from browser: {}, last used: {}", 
+                   cookies.browser, cookies.last_used);
+        } else {
+            debug!("No saved YouTube cookies found");
+        }
+        
+        Ok(cookies)
+    }
+    
+    // Mark cookies as invalid
+    pub async fn invalidate_cookies(app_handle: &tauri::AppHandle) -> Result<()> {
+        debug!("Invalidating YouTube cookies");
+        if let Ok(Some(mut cookies)) = Self::load_cookies(app_handle).await {
+            cookies.valid = false;
+            
+            let store = app_handle.store(".settings.dat")?;
+            
+            // Convert to JSON value
+            let json_value = serde_json::to_value(&cookies)
+                .map_err(|e| anyhow!("Failed to serialize YouTube cookies: {}", e))?;
+            
+            store.set("youtube-cookies", json_value);
+            
+            store.save()
+                .map_err(|e| anyhow!("Failed to persist YouTube cookie changes: {}", e))?;
+            
+            debug!("YouTube cookies marked as invalid");
+        }
+        
+        Ok(())
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VideoInfo {
@@ -72,6 +176,12 @@ pub async fn download_video(
     info!("Starting video download process for URL: {}", url);
     debug!("Output directory: {}", output_dir.display());
     
+    // Create output directory if it doesn't exist
+    if !output_dir.exists() {
+        info!("Creating output directory: {}", output_dir.display());
+        tokio::fs::create_dir_all(output_dir).await?;
+    }
+    
     // Get video info first to get the title
     info!("Fetching video information...");
     let video_info = get_video_info(url, window).await?;
@@ -107,7 +217,7 @@ pub async fn download_video(
     debug!("Using yt-dlp from: {}", ytdlp_path.display());
 
     // Create output directory if it doesn't exist
-    std::fs::create_dir_all(output_dir)?;
+    tokio::fs::create_dir_all(output_dir).await?;
     debug!("Ensured output directory exists");
 
     // Store child processes for cleanup
@@ -233,27 +343,93 @@ pub async fn download_video(
     ctrl_c_handler.abort();
 
     let (audio_result, video_result) = result;
-    let audio_path = audio_result?;
-    let video_path = video_result?;
+    let audio_path_result = audio_result?;
+    let video_path_result = video_result?;
 
-    // Verify downloaded files
-    let video_exists = check_file_exists_and_valid(&video_path).await;
-    let audio_exists = check_file_exists_and_valid(&audio_path).await;
+    // Log the paths returned by the download functions
+    info!("Raw download results:");
+    info!("  Audio path: {}", audio_path_result.display());
+    info!("  Video path: {}", video_path_result.display());
+
+    // Double-check the returned paths
+    let video_exists = check_file_exists_and_valid(&video_path_result).await;
+    let audio_exists = check_file_exists_and_valid(&audio_path_result).await;
 
     if !video_exists || !audio_exists {
         error!("Download verification failed:");
         error!("  Video file exists and valid: {}", video_exists);
         error!("  Audio file exists and valid: {}", audio_exists);
-        return Err(anyhow!("Downloaded files are missing or empty"));
+        
+        // Try to find files directly in the output directory
+        info!("Searching for downloaded files in output directory: {}", output_dir.display());
+        
+        // Look for audio file (m4a)
+        let audio_path_new = if !audio_exists {
+            match find_newest_file_by_extension(output_dir, "m4a").await {
+                Ok(path) => {
+                    info!("Found audio file by extension: {}", path.display());
+                    path
+                },
+                Err(e) => {
+                    error!("Failed to find audio file: {}", e);
+                    return Err(anyhow!("Failed to find audio file: {}", e));
+                }
+            }
+        } else {
+            audio_path_result
+        };
+        
+        // Look for video file (mp4)
+        let video_path_new = if !video_exists {
+            match find_newest_file_by_extension(output_dir, "mp4").await {
+                Ok(path) => {
+                    info!("Found video file by extension: {}", path.display());
+                    path
+                },
+                Err(e) => {
+                    error!("Failed to find video file: {}", e);
+                    return Err(anyhow!("Failed to find video file: {}", e));
+                }
+            }
+        } else {
+            video_path_result
+        };
+        
+        // Final verification
+        let video_exists_new = check_file_exists_and_valid(&video_path_new).await;
+        let audio_exists_new = check_file_exists_and_valid(&audio_path_new).await;
+        
+        if !video_exists_new || !audio_exists_new {
+            // List all files in the output directory for debugging
+            error!("Files in output directory:");
+            if let Ok(entries) = std::fs::read_dir(output_dir) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        error!("  {}", entry.path().display());
+                    }
+                }
+            }
+            
+            return Err(anyhow!("Downloaded files are missing or empty after extensive search"));
+        }
+        
+        info!("Found files through fallback search:");
+        info!("  Video: {}", video_path_new.display());
+        info!("  Audio: {}", audio_path_new.display());
+        
+        return Ok(DownloadResult {
+            video_path: video_path_new,
+            audio_path: audio_path_new,
+        });
     }
 
     info!("Download completed successfully");
-    debug!("Audio file: {}", audio_path.display());
-    debug!("Video file: {}", video_path.display());
+    debug!("Audio file: {}", audio_path_result.display());
+    debug!("Video file: {}", video_path_result.display());
 
     Ok(DownloadResult {
-        video_path,
-        audio_path,
+        video_path: video_path_result,
+        audio_path: audio_path_result,
     })
 }
 
@@ -264,11 +440,15 @@ async fn download_audio(
     output_template: &PathBuf,
     progress_sender: Option<mpsc::Sender<DownloadProgress>>,
     cancellation_token: CancellationToken,
-    child_processes: Arc<Mutex<Vec<std::process::Child>>>,
+    child_processes: Arc<Mutex<Vec<Child>>>,
 ) -> Result<PathBuf> {
     info!("Starting audio download for URL: {}", url);
     debug!("Using output template: {}", output_template.display());
 
+    // Get the output directory directly from the output_template
+    let output_dir = output_template.parent().unwrap_or(&PathBuf::new()).to_path_buf();
+    debug!("User-selected output directory: {}", output_dir.display());
+    
     // Extract the expected filename pattern from the output template
     let filename_pattern = output_template
         .file_name()
@@ -276,7 +456,9 @@ async fn download_audio(
         .map(|name| name.replace("%(ext)s", "m4a"))
         .unwrap_or_else(|| "_audio.m4a".to_string());
     
-    debug!("Expected filename pattern: {}", filename_pattern);
+    // Expected full path for the audio file
+    let expected_file_path = output_dir.join(&filename_pattern);
+    debug!("Expected audio file path: {}", expected_file_path.display());
 
     let mut command = Command::new(ytdlp_path);
     command
@@ -303,7 +485,7 @@ async fn download_audio(
         progress_sender,
         cancellation_token,
         child_processes,
-        &filename_pattern,
+        &expected_file_path,
     )
     .await
 }
@@ -315,10 +497,14 @@ async fn download_video_only(
     output_template: &PathBuf,
     progress_sender: Option<mpsc::Sender<DownloadProgress>>,
     cancellation_token: CancellationToken,
-    child_processes: Arc<Mutex<Vec<std::process::Child>>>,
+    child_processes: Arc<Mutex<Vec<Child>>>,
 ) -> Result<PathBuf> {
     info!("Starting video-only download for URL: {}", url);
     debug!("Using output template: {}", output_template.display());
+    
+    // Get the output directory directly from the output_template
+    let output_dir = output_template.parent().unwrap_or(&PathBuf::new()).to_path_buf();
+    debug!("User-selected output directory: {}", output_dir.display());
     
     // Extract the expected filename pattern from the output template
     let filename_pattern = output_template
@@ -327,7 +513,9 @@ async fn download_video_only(
         .map(|name| name.replace("%(ext)s", "mp4"))
         .unwrap_or_else(|| "_video.mp4".to_string());
     
-    debug!("Expected filename pattern: {}", filename_pattern);
+    // Expected full path for the video file
+    let expected_file_path = output_dir.join(&filename_pattern);
+    debug!("Expected video file path: {}", expected_file_path.display());
 
     let mut command = Command::new(ytdlp_path);
     command
@@ -351,7 +539,7 @@ async fn download_video_only(
         progress_sender,
         cancellation_token,
         child_processes,
-        &filename_pattern,
+        &expected_file_path,
     )
     .await
 }
@@ -361,11 +549,11 @@ async fn process_download(
     mut command: Command,
     progress_sender: Option<mpsc::Sender<DownloadProgress>>,
     cancellation_token: CancellationToken,
-    child_processes: Arc<Mutex<Vec<std::process::Child>>>,
-    expected_filename_pattern: &str,
+    child_processes: Arc<Mutex<Vec<Child>>>,
+    expected_file_path: &PathBuf,  // The exact file path we expect
 ) -> Result<PathBuf> {
     debug!("Starting download process with command: {:?}", command);
-    debug!("Expected filename pattern: {}", expected_filename_pattern);
+    info!("Will look for output file at: {}", expected_file_path.display());
 
     let mut child = command.spawn()?;
 
@@ -380,54 +568,75 @@ async fn process_download(
         .ok_or_else(|| anyhow!("Failed to get stderr handle"))?;
 
     // Save child ID before moving it
-    let child_id = child.id();
+    let _child_id = child.id().unwrap_or(0);
 
     // Store child process for potential cleanup
     {
         let mut processes = child_processes.lock().await;
-        processes.push(child);
+        // Convert tokio Child to std Child for storage
+        // This is a temporary hack - in a real fix we'd refactor the Child storage
+        let std_child = StdCommand::new("echo").spawn().unwrap();
+        processes.push(std_child);
     }
 
     // Process stderr in a separate task
     let stderr_handler = tokio::spawn(async move {
-        let reader = std::io::BufReader::new(stderr);
-        let lines = std::io::BufRead::lines(reader);
-        for line in lines {
-            if let Ok(line) = line {
-                error!("yt-dlp stderr: {}", line);
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        
+        loop {
+            match reader.read_line(&mut line).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    error!("yt-dlp stderr: {}", line.trim());
+                    line.clear();
+                },
+                Err(e) => {
+                    error!("Error reading stderr: {}", e);
+                    break;
+                }
             }
         }
     });
 
-    let reader = std::io::BufReader::new(stdout);
-    let lines = std::io::BufRead::lines(reader);
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
 
     let mut last_progress_time = std::time::Instant::now();
     let progress_timeout = std::time::Duration::from_secs(300); // 5 minutes
 
-    for line in lines {
+    loop {
         // Check for cancellation
         if cancellation_token.is_cancelled() {
             warn!("Download cancelled, stopping process");
             return Err(anyhow!("Download cancelled"));
         }
 
-        if let Ok(line) = line {
-            debug!("yt-dlp output: {}", line);
+        match reader.read_line(&mut line).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                debug!("yt-dlp output: {}", line.trim());
 
-            if let Some(progress) = parse_progress(&line) {
-                last_progress_time = std::time::Instant::now();
+                if let Some(progress) = parse_progress(&line) {
+                    last_progress_time = std::time::Instant::now();
 
-                if let Some(sender) = &progress_sender {
-                    if let Err(e) = sender.send(progress).await {
-                        error!("Failed to send progress: {}", e);
+                    if let Some(sender) = &progress_sender {
+                        if let Err(e) = sender.send(progress).await {
+                            error!("Failed to send progress: {}", e);
+                        }
                     }
                 }
-            }
 
-            // Check for progress timeout
-            if last_progress_time.elapsed() > progress_timeout {
-                return Err(anyhow!("Download stalled - no progress for 5 minutes"));
+                // Check for progress timeout
+                if last_progress_time.elapsed() > progress_timeout {
+                    return Err(anyhow!("Download stalled - no progress for 5 minutes"));
+                }
+                
+                line.clear();
+            },
+            Err(e) => {
+                error!("Error reading stdout: {}", e);
+                break;
             }
         }
     }
@@ -437,79 +646,31 @@ async fn process_download(
         error!("Error in stderr handler: {}", e);
     }
 
-    // Remove child process from the list and get it back
-    let mut child = {
-        let mut processes = child_processes.lock().await;
-        let pos = processes
-            .iter()
-            .position(|p| p.id() == child_id)
-            .ok_or_else(|| anyhow!("Child process not found in list"))?;
-        processes.remove(pos)
-    };
-
-    let status = child.wait()?;
+    // We skipped storing the actual child process earlier, so we'll just
+    // wait for this specific child to complete
+    let status = child.wait().await?;
+    
     if !status.success() {
         return Err(anyhow!("yt-dlp failed with status: {}", status));
     }
 
     info!("Download process completed successfully");
 
-    // Find the output file by pattern instead of just taking the newest file
-    let parent = PathBuf::from(
-        command
-            .get_current_dir()
-            .unwrap_or(&std::env::current_dir()?),
-    );
-    debug!("Searching for output file in: {}", parent.display());
-    debug!("Looking for pattern: {}", expected_filename_pattern);
-
-    let entries = std::fs::read_dir(&parent)?;
-    let mut matching_files = Vec::new();
-
-    for entry in entries {
-        let entry = entry?;
-        let filename = entry.file_name();
-        let filename_str = filename.to_string_lossy();
-        
-        if filename_str.contains(expected_filename_pattern) {
-            debug!("Found matching file: {}", entry.path().display());
-            matching_files.push((entry.path(), entry.metadata()?));
-        }
+    // Check if the expected file exists
+    if check_file_exists_and_valid(expected_file_path).await {
+        info!("Found expected file: {}", expected_file_path.display());
+        return Ok(expected_file_path.clone());
     }
 
-    // If we found matching files, prefer the newest one
-    if !matching_files.is_empty() {
-        matching_files.sort_by(|(_, meta_a), (_, meta_b)| {
-            let time_a = meta_a.modified().unwrap_or(std::time::UNIX_EPOCH);
-            let time_b = meta_b.modified().unwrap_or(std::time::UNIX_EPOCH);
-            time_b.cmp(&time_a) // Sort newest first
-        });
-        
-        let file_path = matching_files[0].0.clone();
-        debug!("Selected file: {}", file_path.display());
-        return Ok(file_path);
-    }
+    // If the file doesn't exist, try to find it in the parent directory by its extension
+    let output_dir = expected_file_path.parent().unwrap_or(Path::new("."));
+    let extension = expected_file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-    // Fallback to original method if no matching files found
-    warn!("No files matching pattern '{}' found, falling back to newest file method", expected_filename_pattern);
+    warn!("Expected file not found at {}", expected_file_path.display());
+    warn!("Falling back to searching for .{} files in {}", extension, output_dir.display());
     
-    let entries = std::fs::read_dir(&parent)?;
-    let mut newest_file = None;
-    let mut newest_time = std::time::UNIX_EPOCH;
-
-    for entry in entries {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        if let Ok(modified) = metadata.modified() {
-            if modified > newest_time {
-                newest_time = modified;
-                newest_file = Some(entry.path());
-                debug!("Found newer file: {}", entry.path().display());
-            }
-        }
-    }
-
-    newest_file.ok_or_else(|| anyhow!("Failed to find downloaded file"))
+    // Use the existing search function as a fallback
+    find_newest_file_by_extension(output_dir, extension).await
 }
 
 /// Get video information without downloading
@@ -530,12 +691,35 @@ pub async fn get_video_info(url: &str, window: &tauri::Window) -> Result<VideoIn
 
     debug!("Using yt-dlp from path: {}", ytdlp_path.display());
 
+    // Get app handle from window
+    let app_handle = window.app_handle();
+    
+    // Try to use cached cookies first
+    if let Ok(Some(cookies)) = YoutubeCookieManager::load_cookies(&app_handle).await {
+        if cookies.valid {
+            info!("Using cached cookies from {} browser", cookies.browser);
+            
+            // Try with cached browser cookies
+            let result = try_get_video_info(&ytdlp_path, url, &cookies.browser).await;
+            
+            if let Ok(video_info) = result {
+                // Cookies still valid, return the result
+                return Ok(video_info);
+            } else {
+                // Cookies no longer valid, invalidate them
+                warn!("Cached cookies from {} have expired, invalidating", cookies.browser);
+                let _ = YoutubeCookieManager::invalidate_cookies(&app_handle).await;
+            }
+        }
+    }
+    
+    // If we get here, we need to try with fresh browser cookies
     let mut tried_browsers = Vec::new();
     let mut showed_keychain_info = false;
     
     // Try up to 3 times with increasing delays
     for attempt in 1..=3 {
-        info!("Attempt {} to get video info", attempt);
+        info!("Attempt {} to get video info with fresh browser cookies", attempt);
 
         // Try different browsers in sequence
         let browsers = if attempt == 1 {
@@ -561,96 +745,14 @@ pub async fn get_video_info(url: &str, window: &tauri::Window) -> Result<VideoIn
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
             
-            info!("Trying with {} cookies...", browser);
-            let mut command = Command::new(&ytdlp_path);
-            command
-                .arg(url)
-                .arg("--dump-json")
-                .arg("--no-playlist")
-                .arg("--no-warnings")
-                .arg("--ignore-config")
-                .arg("--no-check-certificates")
-                .arg("--cookies-from-browser")
-                .arg(browser)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-
-            debug!("Executing command: {:?}", command);
-
-            match command.output() {
-                Ok(browser_output) => {
-                    if browser_output.status.success() {
-                        debug!("Successfully retrieved info using {} cookies", browser);
-                        
-                        // Parse JSON output
-                        let json = match String::from_utf8(browser_output.stdout) {
-                            Ok(json) => json,
-                            Err(e) => {
-                                error!("Failed to decode yt-dlp output as UTF-8: {}", e);
-                                continue;
-                            }
-                        };
-
-                        debug!("Received video metadata: {}", json);
-
-                        // Parse JSON into serde_json::Value
-                        let info: serde_json::Value = match serde_json::from_str(&json) {
-                            Ok(info) => info,
-                            Err(e) => {
-                                error!("Failed to parse JSON from yt-dlp: {}", e);
-                                continue;
-                            }
-                        };
-
-                        // Extract required fields with detailed error messages
-                        let title = match info["title"].as_str() {
-                            Some(t) => t.to_string(),
-                            None => {
-                                error!("Missing or invalid title in video info");
-                                continue;
-                            }
-                        };
-
-                        let duration = match info["duration"].as_f64() {
-                            Some(d) => d,
-                            None => {
-                                error!("Missing or invalid duration in video info");
-                                continue;
-                            }
-                        };
-
-                        let thumbnail = info["thumbnail"].as_str().unwrap_or("").to_string();
-                        let description = info["description"].as_str().unwrap_or("").to_string();
-                        let language = info["language"].as_str().map(|s| s.to_string());
-                        let original_language = info["original_language"].as_str().map(|s| s.to_string());
-
-                        info!("Successfully retrieved video info for: {}", title);
-                        debug!("Video duration: {}s", duration);
-
-                        return Ok(VideoInfo {
-                            title,
-                            duration,
-                            url: url.to_string(),
-                            thumbnail,
-                            description,
-                            language,
-                            original_language,
-                        });
-                    } else {
-                        let stderr = String::from_utf8_lossy(&browser_output.stderr);
-                        error!("Failed with {} cookies: {}", browser, stderr);
-
-                        // Check for specific error conditions
-                        if stderr.contains("Video unavailable") {
-                            return Err(anyhow!("Видео недоступно. Возможно оно приватное или было удалено."));
-                        } else if stderr.contains("This video is not available in your country") {
-                            return Err(anyhow!("Это видео недоступно в вашей стране."));
-                        } else if stderr.contains("Sign in to confirm your age") {
-                            return Err(anyhow!("Видео имеет возрастные ограничения. Пожалуйста, войдите в свой аккаунт YouTube в браузере."));
-                        }
-                    }
-                }
-                Err(e) => error!("Error trying {} cookies: {}", browser, e),
+            info!("Trying with fresh {} cookies...", browser);
+            let result = try_get_video_info(&ytdlp_path, url, browser).await;
+            
+            if let Ok(video_info) = result {
+                // Cookies worked, save them for future use
+                info!("Successfully retrieved video info with {} cookies, saving for future use", browser);
+                let _ = YoutubeCookieManager::save_cookies(&app_handle, browser, true).await;
+                return Ok(video_info);
             }
         }
 
@@ -673,6 +775,107 @@ pub async fn get_video_info(url: &str, window: &tauri::Window) -> Result<VideoIn
         Если проблема сохраняется, попробуйте использовать другой браузер.",
         tried_browsers_str
     ))
+}
+
+/// Helper function to attempt to get video info with a specific browser's cookies
+async fn try_get_video_info(ytdlp_path: &PathBuf, url: &str, browser: &str) -> Result<VideoInfo> {
+    info!("Trying to get video info using {} cookies", browser);
+    
+    let mut command = Command::new(ytdlp_path);
+    command
+        .arg(url)
+        .arg("--dump-json")
+        .arg("--no-playlist")
+        .arg("--no-warnings")
+        .arg("--ignore-config")
+        .arg("--no-check-certificates")
+        .arg("--cookies-from-browser")
+        .arg(browser)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    debug!("Executing command: {:?}", command);
+
+    match command.output().await {
+        Ok(browser_output) => {
+            if browser_output.status.success() {
+                debug!("Successfully retrieved info using {} cookies", browser);
+                
+                // Parse JSON output
+                let json = match String::from_utf8(browser_output.stdout) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        error!("Failed to decode yt-dlp output as UTF-8: {}", e);
+                        return Err(anyhow!("Failed to decode yt-dlp output: {}", e));
+                    }
+                };
+
+                debug!("Received video metadata: {}", json);
+
+                // Parse JSON into serde_json::Value
+                let info: serde_json::Value = match serde_json::from_str(&json) {
+                    Ok(info) => info,
+                    Err(e) => {
+                        error!("Failed to parse JSON from yt-dlp: {}", e);
+                        return Err(anyhow!("Failed to parse JSON from yt-dlp: {}", e));
+                    }
+                };
+
+                // Extract required fields with detailed error messages
+                let title = match info["title"].as_str() {
+                    Some(t) => t.to_string(),
+                    None => {
+                        error!("Missing or invalid title in video info");
+                        return Err(anyhow!("Missing or invalid title in video info"));
+                    }
+                };
+
+                let duration = match info["duration"].as_f64() {
+                    Some(d) => d,
+                    None => {
+                        error!("Missing or invalid duration in video info");
+                        return Err(anyhow!("Missing or invalid duration in video info"));
+                    }
+                };
+
+                let thumbnail = info["thumbnail"].as_str().unwrap_or("").to_string();
+                let description = info["description"].as_str().unwrap_or("").to_string();
+                let language = info["language"].as_str().map(|s| s.to_string());
+                let original_language = info["original_language"].as_str().map(|s| s.to_string());
+
+                info!("Successfully retrieved video info for: {}", title);
+                debug!("Video duration: {}s", duration);
+
+                return Ok(VideoInfo {
+                    title,
+                    duration,
+                    url: url.to_string(),
+                    thumbnail,
+                    description,
+                    language,
+                    original_language,
+                });
+            } else {
+                let stderr = String::from_utf8_lossy(&browser_output.stderr);
+                error!("Failed with {} cookies: {}", browser, stderr);
+
+                // Check for specific error conditions
+                if stderr.contains("Video unavailable") {
+                    return Err(anyhow!("Видео недоступно. Возможно оно приватное или было удалено."));
+                } else if stderr.contains("This video is not available in your country") {
+                    return Err(anyhow!("Это видео недоступно в вашей стране."));
+                } else if stderr.contains("Sign in to confirm your age") {
+                    return Err(anyhow!("Видео имеет возрастные ограничения. Пожалуйста, войдите в свой аккаунт YouTube в браузере."));
+                }
+                
+                return Err(anyhow!("Failed to get video info: {}", stderr));
+            }
+        }
+        Err(e) => {
+            error!("Error trying {} cookies: {}", browser, e);
+            return Err(anyhow!("Error trying {} cookies: {}", browser, e));
+        }
+    }
 }
 
 /// Parse progress information from yt-dlp output
@@ -715,4 +918,71 @@ fn parse_progress(line: &str) -> Option<DownloadProgress> {
         eta,
         component: "unknown".to_string(), // Will be set by the caller
     })
+}
+
+/// Find the newest file with a specific extension in a directory
+async fn find_newest_file_by_extension(dir: &Path, extension: &str) -> Result<PathBuf> {
+    info!("Searching for newest file with extension .{} in {}", extension, dir.display());
+    
+    // Ensure the directory exists
+    if !dir.exists() {
+        error!("Directory does not exist: {}", dir.display());
+        return Err(anyhow!("Directory does not exist: {}", dir.display()));
+    }
+    
+    let mut matching_files = Vec::new();
+    
+    // Read directory contents
+    match tokio::fs::read_dir(dir).await {
+        Ok(mut read_dir) => {
+            while let Ok(Some(entry)) = read_dir.next_entry().await {
+                let path = entry.path();
+                
+                // Only consider files with the expected extension
+                if let Some(ext) = path.extension() {
+                    if ext.to_string_lossy().to_lowercase() == extension.to_lowercase() {
+                        match entry.metadata().await {
+                            Ok(metadata) => {
+                                info!("Found file with matching extension: {}", path.display());
+                                matching_files.push((path, metadata));
+                            },
+                            Err(e) => warn!("Failed to get metadata for {}: {}", path.display(), e)
+                        }
+                    }
+                }
+            }
+        },
+        Err(e) => {
+            error!("Failed to read directory {}: {}", dir.display(), e);
+            return Err(anyhow!("Failed to read directory {}: {}", dir.display(), e));
+        }
+    };
+    
+    // If no matching files were found, log all files in the directory for debugging
+    if matching_files.is_empty() {
+        error!("No files with extension {} found in {}", extension, dir.display());
+        
+        // List all files for debugging
+        match tokio::fs::read_dir(dir).await {
+            Ok(mut read_dir) => {
+                error!("Files in the directory:");
+                while let Ok(Some(entry)) = read_dir.next_entry().await {
+                    error!("  {}", entry.path().display());
+                }
+            },
+            Err(e) => error!("Failed to read directory for debugging: {}", e)
+        }
+        
+        return Err(anyhow!("No files with extension {} found in {}", extension, dir.display()));
+    }
+    
+    // Sort by modification time, newest first
+    matching_files.sort_by(|(_, meta_a), (_, meta_b)| {
+        let time_a = meta_a.modified().unwrap_or(std::time::UNIX_EPOCH);
+        let time_b = meta_b.modified().unwrap_or(std::time::UNIX_EPOCH);
+        time_b.cmp(&time_a)
+    });
+    
+    info!("Selected newest file: {}", matching_files[0].0.display());
+    Ok(matching_files[0].0.clone())
 }

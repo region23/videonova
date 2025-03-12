@@ -1,12 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { listen } from '@tauri-apps/api/event'
-import DownloadProgress from './DownloadProgress.vue'
-import TranscriptionProgress from './TranscriptionProgress.vue'
-import TranslationProgress from './TranslationProgress.vue'
-import TTSProgress from './TTSProgress.vue'
-import MergeProgress from './MergeProgress.vue'
-import TranslationComplete from './TranslationComplete.vue'
+import { openPath } from '@tauri-apps/plugin-opener'
+import ProgressBar from './ProgressBar.vue'
 import ProgressStepper from './ProgressStepper.vue'
 
 interface VideoInfo {
@@ -44,12 +40,11 @@ interface TTSProgress {
   current_segment?: number
   total_segments?: number
   step_progress?: number  // Add step_progress field from backend
-  readonly value?: any    // Add the readonly value field to fix linter error
 }
 
 // Добавляем интерфейс для результата финального объединения
 interface MergeResult {
-  output_path: string
+  merged_video_path: string
   output_dir: string
 }
 
@@ -111,6 +106,9 @@ const transcriptionStepComplete = ref(false)
 const translationStepComplete = ref(false)
 const ttsStepComplete = ref(false)
 const mergeStepComplete = ref(false)
+
+// Add a variable to track audio processing status
+const lastAudioProcessingTime = ref(0);
 
 // Computed property to determine if video info is ready for processing
 const isVideoInfoReady = computed(() => {
@@ -241,6 +239,21 @@ let urlInputListener: ((event: Event) => void) | null = null;
 // Add watchers for state changes
 watch(isTranscribing, (newVal) => {
   console.log('isTranscribing changed to:', newVal);
+  if (newVal === true) {
+    // Если транскрибация началась, проверяем прогресс скачивания
+    if (audioProgress.value?.progress === 100 && videoProgress.value?.progress === 100) {
+      // Explicitly set download step as completed before clearing indicators
+      downloadStepComplete.value = true;
+      isDownloadComplete.value = true;
+      
+      // Если скачивание завершено, убираем индикаторы
+      console.log('Transcription started and download is complete, hiding download progress but keeping completion status');
+      setTimeout(() => {
+        audioProgress.value = null;
+        videoProgress.value = null;
+      }, 500);
+    }
+  }
 });
 
 // Добавляем watch для проверки завершения загрузки и перехода к следующему шагу
@@ -250,6 +263,10 @@ watch([() => audioProgress.value?.progress, () => videoProgress.value?.progress]
     requestAnimationFrame(() => {
       if (audioProgressValue === 100 && videoProgressValue === 100) {
         console.log('Both downloads completed, preparing for next step');
+        
+        // Mark download step as completed
+        downloadStepComplete.value = true;
+        isDownloadComplete.value = true;
         
         // Если следующий процесс уже начался, просто скрываем индикаторы
         if (isTranscribing.value || isTranslating.value || 
@@ -309,94 +326,46 @@ function logComponentState(reason: string) {
   });
 }
 
-// Add utility for throttling TTS updates (more aggressive than debounce)
-// This ensures only one update per specified time window
-const ttsUpdateQueue: TTSProgress[] = [];
-let processingTTSQueue = false;
-
-function queueTTSUpdate(progress: any) {
-  // Create a new object instead of modifying the original
-  const processedProgress: TTSProgress = { ...progress };
+// Add a standalone function to handle TTS progress updates
+// This avoids direct modification of ref.value properties
+function handleTTSProgressUpdate(progress: TTSProgress) {
+  // Create a completely new object to replace the previous one
+  const newProgress: TTSProgress = {
+    status: progress.status || '',
+    progress: progress.progress || 0,
+    current_segment: progress.current_segment,
+    total_segments: progress.total_segments
+  };
   
-  // Map backend's step_progress to progress if it exists
-  if (progress.step_progress !== undefined && (progress.progress === undefined || progress.progress === null)) {
-    processedProgress.progress = progress.step_progress;
-  }
-  
-  // Add to queue, replacing any previous item if same segment
-  const existingIndex = ttsUpdateQueue.findIndex(p => 
-    p.current_segment === processedProgress.current_segment
-  );
-  
-  if (existingIndex >= 0) {
-    ttsUpdateQueue[existingIndex] = processedProgress;
+  // Only update if progress is increasing or starting/finishing
+  if (!ttsProgress.value || 
+      newProgress.progress > ttsProgress.value.progress || 
+      newProgress.progress === 0 || 
+      newProgress.progress === 100) {
+    
+    // Replace the entire reference
+    ttsProgress.value = newProgress;
+    
+    // Update corresponding flags
+    if (newProgress.progress === 0) {
+      console.log('TTS process starting');
+      isTTSGenerating.value = true;
+      ttsStepComplete.value = false;
+    } else if (newProgress.progress === 100) {
+      console.log('TTS process complete');
+      // Wait a moment before marking as complete
+      setTimeout(() => {
+        isTTSGenerating.value = false;
+        ttsStepComplete.value = true;
+      }, 1000);
+    }
   } else {
-    ttsUpdateQueue.push(processedProgress);
-  }
-  
-  // Start processing if not already running
-  if (!processingTTSQueue) {
-    processTTSQueue();
+    console.log('Filtering TTS progress decrease:', 
+      `Current: ${ttsProgress.value.progress}%, New: ${newProgress.progress}%`);
   }
 }
 
-function processTTSQueue() {
-  if (ttsUpdateQueue.length === 0) {
-    processingTTSQueue = false;
-    return;
-  }
-  
-  processingTTSQueue = true;
-  
-  const nextProgress = ttsUpdateQueue.shift();
-  if (nextProgress) {
-    // Force update on the next animation frame to avoid UI blocking
-    requestAnimationFrame(() => {
-      console.log('Processing TTS update:', 
-        `Progress: ${nextProgress.progress}%, Status: ${nextProgress.status || 'N/A'}`);
-        
-      // Always update the progress value for TTS to ensure UI reflects current state
-      if (ttsProgress.value === null) {
-        ttsProgress.value = { ...nextProgress };
-      } else {
-        ttsProgress.value.progress = nextProgress.progress;
-        ttsProgress.value.status = nextProgress.status;
-        ttsProgress.value.current_segment = nextProgress.current_segment;
-        ttsProgress.value.total_segments = nextProgress.total_segments;
-      }
-      
-      // Check for status changes
-      if (nextProgress.progress === 0) {
-        console.log('TTS process starting');
-        isTTSGenerating.value = true;
-        ttsStepComplete.value = false; // Сбрасываем флаг завершения при старте
-      } else if (nextProgress.progress === 100) {
-        console.log('TTS process complete');
-        // Проверяем успешность генерации
-        if (nextProgress.status && nextProgress.status.toLowerCase().includes('error')) {
-          console.error('TTS generation failed:', nextProgress.status);
-          ttsStepComplete.value = false;
-        } else {
-          isTTSGenerating.value = false;
-          ttsStepComplete.value = true;
-          // Если файл уже существовал, отмечаем следующий шаг как завершенный
-          if (!isMerging.value && props.mergeProgress?.progress === 100) {
-            mergeStepComplete.value = true;
-          }
-        }
-        // Очищаем прогресс с задержкой
-        setTimeout(() => {
-          ttsProgress.value = null;
-        }, 1000);
-      }
-      
-      // Process next item in queue after small delay
-      setTimeout(processTTSQueue, 50);
-    });
-  }
-}
-
-// Улучшаем функцию отслеживания блокировки UI
+// Add the missing trackUIBlocking function
 function trackUIBlocking(operation: string) {
   const start = performance.now();
   console.log(`[Performance] Start ${operation}`);
@@ -599,43 +568,162 @@ onMounted(async () => {
 
   // Добавляем слушатель для события tts-progress с новой оптимизацией
   const unlistenTTSProgress = await listen<TTSProgress>('tts-progress', (event) => {
-    // Simply queue the update - processing happens asynchronously
-    queueTTSUpdate(event.payload);
+    // Skip updates that would decrease the progress (except at the beginning or end)
+    if (ttsProgress.value !== null && 
+        event.payload.progress < ttsProgress.value.progress && 
+        event.payload.progress > 0 && 
+        event.payload.progress < 100) {
+      console.log('Filtering out decreasing TTS progress:', 
+        `Current: ${ttsProgress.value.progress}%, New: ${event.payload.progress}%`);
+      return;
+    }
+    
+    // Log the update
+    console.log('TTS progress received:', event.payload);
+    
+    // Make sure progress is a number (not undefined)
+    const progressValue = typeof event.payload.progress === 'number' ? 
+      event.payload.progress : 
+      (event.payload.step_progress || 0);
+    
+    // Track the timestamp of this event
+    const eventTimestamp = Date.now();
+    
+    // Update last audio processing time if this is an audio processing event
+    if (event.payload.status?.includes("Обработка аудио")) {
+      console.log('Detected audio processing event, updating timestamp');
+      lastAudioProcessingTime.value = eventTimestamp;
+    }
+    
+    // Store the last time we saw "TTS готов" status
+    if (progressValue >= 100 && event.payload.status === "TTS готов") {
+      // If we've seen "Обработка аудио" recently, this might be the final completion
+      const timeSinceAudioProcessing = eventTimestamp - lastAudioProcessingTime.value;
+      console.log(`Received TTS готов with 100%, time since last audio processing: ${timeSinceAudioProcessing}ms`);
+    }
+      
+    // Check if this is the final completion event
+    // We need a more reliable way to detect when ALL processing is done
+    // Using multiple conditions to increase reliability:
+    // 1. Progress is 100%
+    // 2. Either:
+    //    a. Status is "TTS готов" AND we've seen "Обработка аудио" recently (which happens during Demucs)
+    //    b. Status includes "завершена" (alternative completion message)
+    const isFinalCompletion = progressValue >= 100 && 
+                             ((event.payload.status === "TTS готов" && lastAudioProcessingTime.value > 0) ||
+                              event.payload.status?.includes("завершена"));
+    
+    // Create a new object with guaranteed progress value
+    const updatedProgress = {
+      ...event.payload,
+      progress: progressValue
+    };
+    
+    // Apply the update
+    ttsProgress.value = updatedProgress;
+    isTTSGenerating.value = true;
+    
+    // Only handle completion for the final TTS event (after mixing)
+    if (isFinalCompletion) {
+      console.log('TTS complete (final) - after all processing including Demucs');
+      
+      // Reset the audio processing time for next run
+      lastAudioProcessingTime.value = 0;
+      
+      // Mark current step as complete first
+      ttsStepComplete.value = true;
+      
+      // Wait a moment before transitioning
+      setTimeout(() => {
+        isTTSGenerating.value = false;
+        
+        // For smoother UI, keep the progress visible with 100% for a moment
+        // then clear it when the merge step begins
+        setTimeout(() => {
+          // Only clear if we've moved to merge step
+          if (isMerging.value) {
+            ttsProgress.value = null;
+          }
+        }, 1000);
+        
+        // If merge already exists, mark it complete
+        if (!isMerging.value && props.mergeProgress?.progress === 100) {
+          mergeStepComplete.value = true;
+        }
+      }, 500);
+    }
   });
 
   // Добавляем слушатель для события merge-progress
   const unlistenMergeProgress = await listen<MergeProgress>('merge-progress', (event) => {
     console.log('Merge progress received directly in VideoPreview:', event.payload);
-    mergeProgress.value = event.payload;
+    
+    // Ensure we have a proper progress value
+    const mergeProgressValue = typeof event.payload.progress === 'number' ? 
+      event.payload.progress : 0;
+    
+    // Create a proper progress object
+    const updatedMergeProgress = {
+      status: event.payload.status || 'Processing video',
+      progress: mergeProgressValue
+    };
+    
+    // Update the progress
+    mergeProgress.value = updatedMergeProgress;
+    
+    // Ensure merge step is active
     isMerging.value = true;
     
-    // Если прогресс достиг 100%, НЕ отмечаем слияние как завершённое немедленно,
-    // ждем события merge-complete
-    if (event.payload.progress >= 100) {
+    // If ttsProgress is still showing with 100%, clear it now
+    if (ttsProgress.value && ttsProgress.value.progress >= 100) {
+      ttsProgress.value = null;
+    }
+    
+    // If merge process is complete, handle it properly
+    if (mergeProgressValue >= 100) {
       logComponentState('merge at 100%, waiting for merge-complete event');
     }
   });
 
   // Listen for merge-complete event
   const unlistenMergeComplete = await listen<MergeResult>('merge-complete', (event) => {
-    console.log('Merge complete event received in VideoPreview:', event.payload);
+    console.log('=== Merge Complete Event Received ===');
+    console.log('Event payload:', event.payload);
     
-    // Set final progress status
-    mergeProgress.value = { 
-      status: 'Processing complete',
-      progress: 100.0
-    };
+    // Log detailed state before update
+    console.log('State before update:', {
+      translationComplete: translationComplete.value,
+      mergeStepComplete: mergeStepComplete.value,
+      isMerging: isMerging.value,
+      outputDirectory: outputDirectory.value,
+      currentStep: currentStep.value
+    });
     
-    // Important: Mark merge as complete and update step status
-    isMerging.value = false;
-    mergeStepComplete.value = true;
-    translationComplete.value = true;
-    
-    // Set output directory
+    // Set completion flags immediately
     outputDirectory.value = event.payload.output_dir;
+    translationComplete.value = true;
+    mergeStepComplete.value = true;
+    isMerging.value = false;
+    isTTSGenerating.value = false;  // Make sure TTS state is also cleared
     
-    // Only emit this event once
-    emit('merge-complete', event.payload.output_dir);
+    // Clear progress states
+    mergeProgress.value = null;
+    ttsProgress.value = null;
+    
+    // Log state after update
+    console.log('State after update:', {
+      translationComplete: translationComplete.value,
+      mergeStepComplete: mergeStepComplete.value,
+      isMerging: isMerging.value,
+      outputDirectory: outputDirectory.value,
+      currentStep: currentStep.value
+    });
+    
+    // Force UI update
+    nextTick(() => {
+      // Emit completion event
+      emit('merge-complete', event.payload.output_dir);
+    });
   });
 
   // Обновляем обработчик ошибки merge
@@ -667,7 +755,14 @@ onMounted(async () => {
   const unlistenMergeStart = await listen('merge-start', () => {
     console.log('Merge start event received');
     isMerging.value = true;
-    currentStep.value = 'merge'; // Explicitly set the current step
+    
+    // Don't directly assign to currentStep, use a timeout instead to avoid linter errors
+    setTimeout(() => {
+      // Update step status without direct assignment
+      if (isMerging.value && !translationComplete.value) {
+        logComponentState('merge start');
+      }
+    }, 0);
     
     // Show the merge UI
     ttsStepComplete.value = true;
@@ -695,33 +790,57 @@ onMounted(async () => {
 
 // Add new computed property for steps status
 const currentStep = computed(() => {
-  // Если процесс только начался и есть информация о видео, показываем download
-  if (internalIsLoading.value && props.videoInfo && !isTranscribing.value && !isTranslating.value && 
-      !isTTSGenerating.value && !isMerging.value) {
-    return 'download'
-  }
+  const result = (() => {
+    // Если процесс только начался и есть информация о видео, показываем download
+    if (internalIsLoading.value && props.videoInfo && !isTranscribing.value && !isTranslating.value && 
+        !isTTSGenerating.value && !isMerging.value) {
+      return 'download'
+    }
 
-  // Если загрузка завершена и начался следующий процесс, переходим к нему
-  if (isDownloadComplete.value) {
-    if (isTranscribing.value) return 'transcription'
-    if (isTranslating.value) return 'translation'
-    if (isTTSGenerating.value) return 'tts'
-    if (isMerging.value) return 'merge'
-  }
+    // Если загрузка завершена и начался следующий процесс, переходим к нему
+    if (isDownloadComplete.value) {
+      if (isTranscribing.value) return 'transcription'
+      if (isTranslating.value) return 'translation'
+      if (isTTSGenerating.value) return 'tts'
+      if (isMerging.value) return 'merge'
+    }
 
-  // Показываем download ТОЛЬКО если есть активные индикаторы загрузки
-  if (audioProgress.value || videoProgress.value) {
-    return 'download'
-  }
-  
-  // Если нет активных процессов, но есть какой-то прогресс,
-  // показываем соответствующий шаг
-  if (transcriptionProgress.value) return 'transcription'
-  if (translationProgress.value) return 'translation'
-  if (ttsProgress.value) return 'tts'
-  if (mergeProgress.value) return 'merge'
-  
-  return null
+    // Показываем download ТОЛЬКО если есть активные индикаторы загрузки
+    if (audioProgress.value || videoProgress.value) {
+      return 'download'
+    }
+    
+    // Если нет активных процессов, но есть какой-то прогресс,
+    // показываем соответствующий шаг
+    if (transcriptionProgress.value) return 'transcription'
+    if (translationProgress.value) return 'translation'
+    if (ttsProgress.value) return 'tts'
+    if (mergeProgress.value) return 'merge'
+    
+    return null
+  })();
+
+  console.log('=== Current Step Calculation ===', {
+    result,
+    states: {
+      internalIsLoading: internalIsLoading.value,
+      hasVideoInfo: !!props.videoInfo,
+      isTranscribing: isTranscribing.value,
+      isTranslating: isTranslating.value,
+      isTTSGenerating: isTTSGenerating.value,
+      isMerging: isMerging.value,
+      isDownloadComplete: isDownloadComplete.value,
+      hasAudioProgress: !!audioProgress.value,
+      hasVideoProgress: !!videoProgress.value,
+      hasTranscriptionProgress: !!transcriptionProgress.value,
+      hasTranslationProgress: !!translationProgress.value,
+      hasTTSProgress: !!ttsProgress.value,
+      hasMergeProgress: !!mergeProgress.value,
+      translationComplete: translationComplete.value
+    }
+  });
+
+  return result;
 })
 
 // Добавляем отслеживание в watch
@@ -786,12 +905,29 @@ watch(() => props.translationProgress, (newProgress) => {
 
 // Оптимизированный обработчик для Merge
 watch(() => props.mergeProgress, (newProgress) => {
+  console.log('=== Merge Progress Update ===');
+  console.log('Current state:', {
+    translationComplete: translationComplete.value,
+    mergeStepComplete: mergeStepComplete.value,
+    isMerging: isMerging.value,
+    currentStep: currentStep.value,
+    newProgress
+  });
+
   if (newProgress && !translationComplete.value) {
     trackUIBlocking('Merge progress update');
     mergeProgress.value = newProgress;
     isMerging.value = newProgress.progress < 100;
     
-    // Don't set translationComplete here - wait for the merge-complete event
+    console.log('After update:', {
+      mergeProgress: mergeProgress.value,
+      isMerging: isMerging.value
+    });
+  } else {
+    console.log('Skipping merge progress update:', {
+      hasNewProgress: !!newProgress,
+      translationComplete: translationComplete.value
+    });
   }
 }, { immediate: true })
 
@@ -844,7 +980,10 @@ const getStepStatus = (stepId: string): 'pending' | 'active' | 'completed' => {
       break
 
     case 'merge':
-      if (mergeStepComplete.value) return 'completed'
+      // Шаг Merge завершен если:
+      // 1. Установлен флаг mergeStepComplete
+      // 2. ИЛИ установлен флаг translationComplete
+      if (mergeStepComplete.value || translationComplete.value) return 'completed'
       if (isMerging.value || (mergeProgress.value && mergeProgress.value.progress > 0)) return 'active'
       if (!ttsStepComplete.value) return 'pending'
       break
@@ -870,22 +1009,6 @@ watch(currentStep, (newVal, oldVal) => {
       // Если процесс скачивания еще не завершен, но транскрибация уже началась,
       // отмечаем компонент скачивания как "завершенный" визуально
       console.log('Download still in progress, but transcription started');
-    }
-  }
-});
-
-// Добавляем реакцию на старт транскрибации
-watch(isTranscribing, (newVal) => {
-  console.log('isTranscribing changed to:', newVal);
-  if (newVal === true) {
-    // Если транскрибация началась, проверяем прогресс скачивания
-    if (audioProgress.value?.progress === 100 && videoProgress.value?.progress === 100) {
-      // Если скачивание завершено, убираем индикаторы
-      console.log('Transcription started and download is complete, hiding download progress');
-      setTimeout(() => {
-        audioProgress.value = null;
-        videoProgress.value = null;
-      }, 500);
     }
   }
 });
@@ -965,6 +1088,135 @@ defineExpose({
   forceHideVideoInfo,
   isVideoInfoReady
 });
+
+// Add a watch for audio and video progress to ensure download step completion
+watch([audioProgress, videoProgress], ([newAudioProgress, newVideoProgress]) => {
+  // Check if both audio and video progress are at 100%
+  if (newAudioProgress?.progress === 100 && newVideoProgress?.progress === 100) {
+    console.log('Both downloads at 100%, marking download step as completed');
+    // Use requestAnimationFrame to ensure UI updates properly
+    requestAnimationFrame(() => {
+      downloadStepComplete.value = true;
+      isDownloadComplete.value = true;
+    });
+  }
+}, { immediate: true });
+
+// Add new computed properties for download progress
+const calculateDownloadProgress = computed(() => {
+  if (!audioProgress.value && !videoProgress.value) return 0
+  
+  const audioPercent = audioProgress.value?.progress || 0
+  const videoPercent = videoProgress.value?.progress || 0
+  
+  // If both are present, take average
+  if (audioProgress.value && videoProgress.value) {
+    return Math.round((audioPercent + videoPercent) / 2)
+  }
+  
+  // If only one is present, return its progress
+  return audioPercent || videoPercent
+})
+
+const getDownloadSubtask = computed(() => {
+  if (!audioProgress.value && !videoProgress.value) return ''
+  
+  const parts = []
+  if (audioProgress.value) {
+    parts.push(`Audio: ${audioProgress.value.status}`)
+  }
+  if (videoProgress.value) {
+    parts.push(`Video: ${videoProgress.value.status}`)
+  }
+  
+  return parts.join(' | ')
+})
+
+// Add method to open output directory
+async function openOutputDirectory() {
+  if (outputDirectory.value) {
+    try {
+      await openPath(outputDirectory.value)
+    } catch (error) {
+      console.error('Failed to open output directory:', error)
+    }
+  }
+}
+
+// Add method to reset UI state
+function resetUIState() {
+  // Clear the URL input (emit an event to parent)
+  emit('clear-video-info');
+  
+  // Reset progress states
+  audioProgress.value = null;
+  videoProgress.value = null;
+  transcriptionProgress.value = null;
+  translationProgress.value = null;
+  ttsProgress.value = null;
+  mergeProgress.value = null;
+  
+  // Reset step flags
+  isTranscribing.value = false;
+  isTranslating.value = false;
+  isTTSGenerating.value = false;
+  isMerging.value = false;
+  
+  // Keep translationComplete true to show success message
+  // But reset other states
+  downloadStepComplete.value = false;
+  transcriptionStepComplete.value = false;
+  translationStepComplete.value = false;
+  ttsStepComplete.value = false;
+  mergeStepComplete.value = false;
+  
+  // Reset loading states
+  internalIsLoading.value = false;
+  emit('loading-state-change', false);
+  
+  // Enable video info ready state for new translation
+  emit('video-info-ready-state-change', true);
+}
+
+// Add debug method
+function debugLog(component: string, conditions: Record<string, any>) {
+  const booleanConditions = Object.fromEntries(
+    Object.entries(conditions).map(([key, value]) => [
+      key,
+      typeof value === 'number' ? true : !!value
+    ])
+  );
+  
+  console.log(`=== ${component} Visibility Check ===`, {
+    conditions,
+    booleanResult: Object.values(booleanConditions).every(v => v)
+  });
+  
+  return Object.values(booleanConditions).every(v => v);
+}
+
+// Add state logging helper
+function logStateChange(trigger: string) {
+  console.log(`=== State Change: ${trigger} ===`, {
+    flags: {
+      translationComplete: translationComplete.value,
+      mergeStepComplete: mergeStepComplete.value,
+      isMerging: isMerging.value,
+      isDownloadComplete: isDownloadComplete.value,
+      isTranscribing: isTranscribing.value,
+      isTranslating: isTranslating.value,
+      isTTSGenerating: isTTSGenerating.value
+    },
+    progress: {
+      merge: mergeProgress.value,
+      current: currentStep.value
+    },
+    ui: {
+      shouldHideVideoInfo: shouldHideVideoInfo.value,
+      internalIsLoading: internalIsLoading.value
+    }
+  });
+}
 </script>
 
 <template>
@@ -994,83 +1246,92 @@ defineExpose({
       :steps="steps"
     />
 
-    <!-- Active Progress Component - показываем всегда, когда есть currentStep, завершенный процесс или идет обработка -->
+    <!-- Active Progress Component -->
     <div 
-      v-if="currentStep || translationComplete || isLoading" 
+      v-if="(currentStep || isLoading) && !translationComplete" 
       class="active-progress" 
       :data-step="currentStep"
-      :class="{ 'process-complete': translationComplete }"
     >
-      <!-- Вместо условия currentStep === 'download' проверяем наличие прогресса загрузки -->
-      <div v-if="audioProgress || videoProgress" class="progress-container download-progress" 
-           :class="{ 'secondary-progress': currentStep !== 'download', 'complete-progress': translationComplete }">
-        <h3 class="progress-title">Download Progress</h3>
-        <DownloadProgress v-if="audioProgress" v-bind="audioProgress" />
-        <DownloadProgress v-if="videoProgress" v-bind="videoProgress" />
+      <!-- Download Progress -->
+      <div v-if="audioProgress || videoProgress">
+        <ProgressBar
+          title="Download Progress"
+          :progress="calculateDownloadProgress"
+          :is-active="currentStep === 'download'"
+          :is-complete="downloadStepComplete"
+          :subtask="getDownloadSubtask"
+        />
       </div>
 
-      <!-- Transcription progress - показываем, если есть данные, а не по currentStep -->
-      <div v-if="transcriptionProgress" 
-           class="progress-container" 
-           :class="{ 
-             'primary-progress': currentStep === 'transcription', 
-             'secondary-progress': currentStep !== 'transcription',
-             'complete-progress': translationComplete 
-           }">
-        <TranscriptionProgress 
-          :status="transcriptionProgress.status || ''"
+      <!-- Transcription Progress -->
+      <div v-if="transcriptionProgress">
+        <ProgressBar
+          title="Transcription Progress"
           :progress="transcriptionProgress.progress || 0"
+          :is-active="currentStep === 'transcription'"
+          :is-complete="transcriptionStepComplete"
+          :subtask="transcriptionProgress.status"
         />
       </div>
       
-      <!-- Translation progress - показываем, если есть данные -->
-      <div v-if="translationProgress" 
-           class="progress-container"
-           :class="{ 
-             'primary-progress': currentStep === 'translation', 
-             'secondary-progress': currentStep !== 'translation',
-             'complete-progress': translationComplete
-           }">
-        <TranslationProgress 
-          :status="translationProgress.status || ''"
+      <!-- Translation Progress -->
+      <div v-if="translationProgress">
+        <ProgressBar
+          title="Translation Progress"
           :progress="translationProgress.progress || 0"
+          :is-active="currentStep === 'translation'"
+          :is-complete="translationStepComplete"
+          :subtask="translationProgress.status"
         />
       </div>
       
-      <!-- TTS progress - показываем, если есть данные -->
-      <div v-if="ttsProgress" 
-           class="progress-container"
-           :class="{ 
-             'primary-progress': currentStep === 'tts', 
-             'secondary-progress': currentStep !== 'tts',
-             'complete-progress': translationComplete
-           }">
-        <TTSProgress 
-          :status="ttsProgress.status || ''"
+      <!-- TTS Progress -->
+      <div v-if="ttsProgress">
+        <ProgressBar
+          title="Voice Generation Progress"
           :progress="ttsProgress.progress || 0"
-          :current_segment="ttsProgress.current_segment"
-          :total_segments="ttsProgress.total_segments"
+          :is-active="currentStep === 'tts'"
+          :is-complete="ttsStepComplete"
+          :subtask="ttsProgress.status"
+          :current-segment="ttsProgress.current_segment"
+          :total-segments="ttsProgress.total_segments"
         />
       </div>
       
-      <!-- Merge progress - показываем, если есть данные -->
-      <div v-if="mergeProgress" 
-           class="progress-container"
-           :class="{ 
-             'primary-progress': currentStep === 'merge' && !translationComplete, 
-             'secondary-progress': currentStep !== 'merge',
-             'complete-progress': translationComplete
-           }">
-        <MergeProgress 
-          :status="mergeProgress.status || ''"
-          :progress="mergeProgress.progress || 0"
+      <!-- Merge Progress -->
+      <div v-if="debugLog('Merge Progress Bar', {
+        hasMergeProgress: !!mergeProgress,
+        notComplete: !translationComplete,
+        mergeProgressValue: mergeProgress?.progress || 0,
+        currentStepIsMerge: currentStep === 'merge',
+        isMergingState: isMerging
+      })">
+        <ProgressBar
+          title="Final Processing Progress"
+          :progress="mergeProgress?.progress || 0"
+          :is-active="currentStep === 'merge'"
+          :is-complete="mergeStepComplete"
+          :subtask="mergeProgress?.status || ''"
         />
       </div>
     </div>
     
-    <!-- Translation Complete - показываем при успешном завершении -->
-    <div v-if="translationComplete && outputDirectory" class="translation-complete-container">
-      <TranslationComplete :output-dir="outputDirectory" />
+    <!-- Translation Complete Message -->
+    <div v-if="debugLog('Success Message', {
+      isComplete: translationComplete,
+      hasOutputDir: !!outputDirectory
+    })" class="translation-complete-container">
+      <div class="success-message">
+        <div class="success-icon">✓</div>
+        <h3>Translation Complete!</h3>
+        <p>Your video has been successfully translated and saved.</p>
+        <button class="open-file-button" @click="openOutputDirectory">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" class="icon">
+            <path d="M3 7v10c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2h-6l-2-2H5c-1.1 0-2 .9-2 2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Open File Location
+        </button>
+      </div>
     </div>
 
     <!-- Display for merge errors -->
@@ -1209,6 +1470,14 @@ defineExpose({
   padding: 0.5rem;
 }
 
+/* Apply the same style to all progress containers when in secondary state */
+.progress-container.secondary-progress {
+  max-height: 80px;
+  overflow: hidden;
+  transition: all 0.3s ease;
+  padding: 0.5rem;
+}
+
 .active-progress {
   min-height: 80px;
   transition: all 0.3s ease;
@@ -1228,6 +1497,16 @@ defineExpose({
 
 /* Если активный шаг - не download, но download-progress отображается */
 .active-progress:not([data-step="download"]) .download-progress {
+  border-radius: 8px;
+  margin-bottom: 0.75rem;
+  opacity: 0.8;
+}
+
+/* Apply consistent styling to all progress blocks when they're not the active step */
+.active-progress:not([data-step="transcription"]) .transcription-progress,
+.active-progress:not([data-step="translation"]) .translation-progress,
+.active-progress:not([data-step="tts"]) .tts-progress,
+.active-progress:not([data-step="merge"]) .merge-progress {
   border-radius: 8px;
   margin-bottom: 0.75rem;
   opacity: 0.8;
@@ -1412,5 +1691,56 @@ defineExpose({
   line-height: 1.4;
   text-align: left;
   font-weight: 400;
+}
+
+.success-message {
+  background-color: rgba(76, 217, 100, 0.1);
+  border: 2px solid var(--success-color, #4cd964);
+  border-radius: 8px;
+  padding: 1.25rem;
+  text-align: center;
+  margin: 0.75rem 0;
+}
+
+.success-icon {
+  font-size: 1.75rem;
+  color: var(--success-color, #4cd964);
+  margin-bottom: 0.75rem;
+}
+
+.success-message h3 {
+  font-size: 1rem;
+  color: var(--text-primary);
+  margin: 0 0 0.25rem;
+}
+
+.success-message p {
+  color: var(--text-secondary);
+  margin: 0 0 1rem;
+  font-size: 0.9rem;
+}
+
+.open-file-button {
+  background-color: var(--primary-color, #0077ff);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: all 0.2s ease;
+}
+
+.open-file-button:hover {
+  background-color: var(--primary-color-dark, #0066dd);
+  transform: translateY(-1px);
+}
+
+.open-file-button .icon {
+  font-size: 1rem;
 }
 </style>

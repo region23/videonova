@@ -1345,18 +1345,34 @@ pub mod synchronizer {
             while let Some(progress) = demucs_rx.recv().await {
                 use super::demucs::DemucsSeparationProgress::*;
                 let (status, progress_value) = match progress {
-                    Started => ("Начало удаления вокала".to_string(), 0.0),
-                    LoadingModel => ("Загрузка модели Demucs".to_string(), 10.0),
-                    Processing { progress } => (format!("Удаление вокала: {}%", (progress * 100.0) as i32), 10.0 + progress * 80.0),
-                    Converting => ("Конвертация результата".to_string(), 90.0),
+                    Started => ("Удаление вокала".to_string(), 0.0),
+                    LoadingModel => ("Удаление вокала".to_string(), 10.0),
+                    Processing { progress } => (format!("Удаление вокала"), 10.0 + progress * 80.0),
+                    Converting => ("Удаление вокала".to_string(), 90.0),
                     Finished => ("Удаление вокала завершено".to_string(), 100.0),
-                    Error(msg) => (format!("Ошибка при удалении вокала: {}", msg), 0.0),
+                    Error(ref msg) => (format!("Ошибка при удалении вокала: {}", msg), 0.0),
                 };
 
+                // For Demucs processing, we want to integrate it better with the overall TTS flow
+                // We'll adjust the index/total calculation to make it fit in the 60-90% range
+                // without resetting progress
                 if let Some(tx) = &progress_sender {
+                    // For vocal removal, we'll use special index values
+                    // that won't trigger 100% progress prematurely
+                    let (special_index, special_total) = match &progress {
+                        super::demucs::DemucsSeparationProgress::Started => (1, 10),
+                        super::demucs::DemucsSeparationProgress::LoadingModel => (2, 10),
+                        super::demucs::DemucsSeparationProgress::Processing { progress: p_val } => 
+                            ((2.0 + p_val * 7.0) as usize, 10),
+                        super::demucs::DemucsSeparationProgress::Converting => (9, 10),
+                        super::demucs::DemucsSeparationProgress::Finished => (10, 10),
+                        super::demucs::DemucsSeparationProgress::Error(_) => (0, 10),
+                    };
+                
                     let _ = tx.send(ProgressUpdate::ProcessingFragment {
-                        index: 0,
-                        total: 1,
+                        // Use specific index numbers that integrate with TTS flow
+                        index: special_index,
+                        total: special_total,
                         step: status,
                     }).await;
                 }

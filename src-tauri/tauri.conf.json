@@ -26,6 +26,7 @@
             "core:tray:default",
             "dialog:default",
             "opener:default",
+            "opener:allow-open-path",
             "store:default"
           ]
         }
