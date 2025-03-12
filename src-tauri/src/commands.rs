@@ -1022,3 +1022,32 @@ async fn process_steps(
     }
     Ok(())
 }
+
+#[tauri::command]
+pub async fn cleanup_temp_files(final_video_path: String, output_dir: String) -> Result<(), String> {
+    // Get the filename from the final video path
+    let final_video_name = std::path::Path::new(&final_video_path)
+        .file_name()
+        .ok_or("Failed to get video filename")?
+        .to_str()
+        .ok_or("Invalid video filename")?;
+
+    // Construct the destination path
+    let destination_path = std::path::Path::new(&output_dir).join(final_video_name);
+
+    // Move the final video to the output directory
+    std::fs::rename(&final_video_path, &destination_path)
+        .map_err(|e| format!("Failed to move video file: {}", e))?;
+
+    // Get the parent directory of the final video (merged directory)
+    let temp_dir = std::path::Path::new(&final_video_path)
+        .parent() // merged directory
+        .and_then(|p| p.parent()) // video directory
+        .ok_or("Failed to get temp directory")?;
+
+    // Remove the entire temp directory
+    std::fs::remove_dir_all(temp_dir)
+        .map_err(|e| format!("Failed to remove temp directory: {}", e))?;
+
+    Ok(())
+}

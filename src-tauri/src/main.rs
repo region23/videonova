@@ -70,6 +70,7 @@ fn main() {
             commands::generate_speech,
             commands::process_video,
             commands::check_file_exists_command,
+            commands::cleanup_temp_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

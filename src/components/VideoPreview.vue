@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { listen } from '@tauri-apps/api/event'
-import { openPath } from '@tauri-apps/plugin-opener'
+import { invoke } from '@tauri-apps/api/core'
+import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import ProgressBar from './ProgressBar.vue'
 import ProgressStepper from './ProgressStepper.vue'
 
@@ -109,6 +110,9 @@ const mergeStepComplete = ref(false)
 
 // Add a variable to track audio processing status
 const lastAudioProcessingTime = ref(0);
+
+// Add ref for final video path
+const finalVideoPath = ref<string | null>(null)
 
 // Computed property to determine if video info is ready for processing
 const isVideoInfoReady = computed(() => {
@@ -686,7 +690,7 @@ onMounted(async () => {
   });
 
   // Listen for merge-complete event
-  const unlistenMergeComplete = await listen<MergeResult>('merge-complete', (event) => {
+  const unlistenMergeComplete = await listen<MergeResult>('merge-complete', async (event) => {
     console.log('=== Merge Complete Event Received ===');
     console.log('Event payload:', event.payload);
     
@@ -701,6 +705,7 @@ onMounted(async () => {
     
     // Set completion flags immediately
     outputDirectory.value = event.payload.output_dir;
+    finalVideoPath.value = event.payload.merged_video_path;
     translationComplete.value = true;
     mergeStepComplete.value = true;
     isMerging.value = false;
@@ -709,6 +714,16 @@ onMounted(async () => {
     // Clear progress states
     mergeProgress.value = null;
     ttsProgress.value = null;
+
+    // Clean up temporary files and move final video
+    try {
+      await invoke('cleanup_temp_files', {
+        final_video_path: finalVideoPath.value,
+        output_dir: outputDirectory.value
+      });
+    } catch (error) {
+      console.error('Error during cleanup:', error);
+    }
     
     // Log state after update
     console.log('State after update:', {
@@ -716,6 +731,7 @@ onMounted(async () => {
       mergeStepComplete: mergeStepComplete.value,
       isMerging: isMerging.value,
       outputDirectory: outputDirectory.value,
+      finalVideoPath: finalVideoPath.value,
       currentStep: currentStep.value
     });
     
@@ -1132,13 +1148,14 @@ const getDownloadSubtask = computed(() => {
   return parts.join(' | ')
 })
 
-// Add method to open output directory
-async function openOutputDirectory() {
-  if (outputDirectory.value) {
+// Add method to open final video file
+async function openFinalVideo() {
+  if (finalVideoPath.value) {
     try {
-      await openPath(outputDirectory.value)
+      console.log('Attempting to reveal video file in directory:', finalVideoPath.value);
+      await revealItemInDir(finalVideoPath.value);
     } catch (error) {
-      console.error('Failed to open output directory:', error)
+      console.error('Failed to reveal video file:', error);
     }
   }
 }
@@ -1325,11 +1342,11 @@ function logStateChange(trigger: string) {
         <div class="success-icon">✓</div>
         <h3>Translation Complete!</h3>
         <p>Your video has been successfully translated and saved.</p>
-        <button class="open-file-button" @click="openOutputDirectory">
+        <button class="open-file-button" @click="openFinalVideo">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" class="icon">
-            <path d="M3 7v10c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V9c0-1.1-.9-2-2-2h-6l-2-2H5c-1.1 0-2 .9-2 2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M15 6.5l4 4-4 4m4-4H8m11 4v3a2 2 0 01-2 2H7a2 2 0 01-2-2V7a2 2 0 012-2h10a2 2 0 012 2v3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
-          Open File Location
+          Play Video
         </button>
       </div>
     </div>
@@ -1529,7 +1546,7 @@ function logStateChange(trigger: string) {
 }
 
 .translation-complete-container {
-  margin-top: 0.5rem;
+  margin-top: 0.25rem;
   width: 100%;
 }
 
@@ -1697,15 +1714,15 @@ function logStateChange(trigger: string) {
   background-color: rgba(76, 217, 100, 0.1);
   border: 2px solid var(--success-color, #4cd964);
   border-radius: 8px;
-  padding: 1.25rem;
+  padding: 0.75rem;
   text-align: center;
-  margin: 0.75rem 0;
+  margin: 0.5rem 0;
 }
 
 .success-icon {
   font-size: 1.75rem;
   color: var(--success-color, #4cd964);
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.5rem;
 }
 
 .success-message h3 {
