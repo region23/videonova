@@ -2,15 +2,13 @@ use log::{error, info, warn};
 use reqwest;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 use std::thread;
 use tauri::Emitter;
 use tokio::sync::mpsc;
 use serde_json::json;
 use std::path::Path;
+use tokio_util::sync::CancellationToken;
 use crate::utils::tts::tts::{synchronizer::{SyncConfig, process_sync}, ProgressUpdate, TtsConfig, AudioProcessingConfig};
 use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
 use crate::utils::merge::{self, MergeProgress};
@@ -25,12 +23,6 @@ pub struct DownloadState {
     #[serde(skip)]
     #[allow(dead_code)]
     progress_sender: mpsc::Sender<DownloadProgress>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct DownloadResult {
-    video_path: String,
-    audio_path: String,
 }
 
 #[derive(Serialize)]
@@ -65,10 +57,19 @@ pub struct MergeResult {
     merged_video_path: String,
 }
 
+#[derive(Debug)]
+pub enum Step {
+    Download { url: String },
+    Transcribe,
+    Translate,
+    GenerateSpeech,
+    Merge,
+}
+
 /// Get information about a YouTube video
 #[tauri::command]
-pub async fn get_video_info(url: String) -> Result<VideoInfo, String> {
-    youtube::get_video_info(&url)
+pub async fn get_video_info(window: tauri::Window, url: String) -> Result<VideoInfo, String> {
+    youtube::get_video_info(&url, &window)
         .await
         .map_err(|e| e.to_string())
 }
@@ -76,142 +77,27 @@ pub async fn get_video_info(url: String) -> Result<VideoInfo, String> {
 /// Start downloading a YouTube video
 #[tauri::command]
 pub async fn download_video(
-    url: String,
-    output_path: String,
     window: tauri::Window,
-) -> Result<DownloadResult, String> {
-    const MAX_RETRIES: u32 = 3;
-    let mut current_attempt = 0;
-
-    loop {
-        current_attempt += 1;
-        info!(
-            "Starting download attempt {} of {}",
-            current_attempt, MAX_RETRIES
-        );
-
-        // Create progress channel for this attempt
-        let (tx, mut rx) = mpsc::channel::<DownloadProgress>(32);
-
-        // Clone window handle for the progress monitoring task
-        let progress_window = window.clone();
-
-        // Track if audio file is completed
-        let audio_completed = Arc::new(AtomicBool::new(false));
-        let audio_completed_clone = audio_completed.clone();
-
-        // Клонируем переменные для использования в замыкании
-        let url_clone = url.clone();
-        let output_path_clone = output_path.clone();
-
-        // Spawn progress monitoring task
-        let progress_handle = tokio::spawn(async move {
-            while let Some(progress) = rx.recv().await {
-                // Emit progress event to frontend
-                if let Err(e) = progress_window.emit("download-progress", progress.clone()) {
-                    error!("Failed to emit progress: {}", e);
-                }
-
-                // Check if audio download is complete
-                if progress.component == "audio"
-                    && progress.progress >= 99.0
-                    && !audio_completed_clone.load(Ordering::Relaxed)
-                {
-                    // Mark as completed to avoid duplicate events
-                    audio_completed_clone.store(true, Ordering::Relaxed);
-
-                    let event_window = progress_window.clone();
-                    let url_event = url_clone.clone();
-                    let output_path_event = output_path_clone.clone();
-
-                    tokio::spawn(async move {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-                        if let Ok(info) = youtube::get_video_info(&url_event).await {
-                            let output_dir = PathBuf::from(&output_path_event);
-                            let safe_title = sanitize_filename(&info.title);
-                            let audio_path = output_dir.join(format!("{}_audio.m4a", safe_title));
-
-                            if let Err(e) = event_window
-                                .emit("audio-ready", audio_path.to_string_lossy().to_string())
-                            {
-                                error!("Failed to emit audio-ready event: {}", e);
-                            }
-                        }
-                    });
-                }
+    url: String,
+    output_dir: String,
+) -> Result<serde_json::Value, String> {
+    let (tx, mut rx) = mpsc::channel(32);
+    let output_dir = PathBuf::from(output_dir);
+    let cancellation_token = CancellationToken::new();
+    
+    // Spawn task to handle progress updates
+    let window_clone = window.clone();
+    tokio::spawn(async move {
+        while let Some(progress) = rx.recv().await {
+            if let Err(e) = window_clone.emit("download_progress", progress) {
+                error!("Failed to emit progress: {}", e);
             }
-        });
-
-        // Start download
-        let output_dir = PathBuf::from(output_path.clone());
-        let result = match youtube::download_video(&url, &output_dir, Some(tx)).await {
-            Ok(result) => {
-                // Verify downloaded files
-                let video_exists = check_file_exists_and_valid(&result.video_path).await;
-                let audio_exists = check_file_exists_and_valid(&result.audio_path).await;
-
-                if !video_exists || !audio_exists {
-                    error!("Download verification failed:");
-                    error!("  Video file exists and valid: {}", video_exists);
-                    error!("  Audio file exists and valid: {}", audio_exists);
-
-                    if current_attempt < MAX_RETRIES {
-                        warn!("Retrying download...");
-                        // Небольшая пауза перед следующей попыткой
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                        continue;
-                    } else {
-                        return Err(format!(
-                            "Failed to download after {} attempts. Files missing or empty.",
-                            MAX_RETRIES
-                        ));
-                    }
-                }
-
-                info!(
-                    "Download completed successfully on attempt {}",
-                    current_attempt
-                );
-                info!(
-                    "  Video path: {} (exists and valid)",
-                    result.video_path.to_string_lossy(),
-                );
-                info!(
-                    "  Audio path: {} (exists and valid)",
-                    result.audio_path.to_string_lossy(),
-                );
-
-                // Wait for progress monitoring to complete
-                let _ = progress_handle.await;
-
-                // Create download result
-                let download_result = DownloadResult {
-                    video_path: result.video_path.to_string_lossy().to_string(),
-                    audio_path: result.audio_path.to_string_lossy().to_string(),
-                };
-
-                // Emit download-complete event
-                if let Err(e) = window.emit("download-complete", download_result.clone()) {
-                    error!("Failed to emit download-complete event: {}", e);
-                }
-
-                Ok(download_result)
-            }
-            Err(e) => {
-                error!("Download failed: {}", e);
-                if current_attempt < MAX_RETRIES {
-                    warn!("Retrying download...");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    continue;
-                } else {
-                    Err(format!("Failed to download after {} attempts: {}", MAX_RETRIES, e))
-                }
-            }
-        };
-
-        // Return the result
-        return result;
+        }
+    });
+    
+    match youtube::download_video(&url, &output_dir, Some(tx), cancellation_token, &window).await {
+        Ok(result) => Ok(result.to_frontend_response()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -840,32 +726,36 @@ pub async fn process_video(
 
     // Step 1: Download video
     info!("Step 1: Downloading video");
-    let download_result =
-        match download_video(url.clone(), output_path.clone(), window.clone()).await {
-            Ok(result) => {
-                info!("Download completed successfully");
-                info!("  Video path: {}", result.video_path);
-                info!("  Audio path: {}", result.audio_path);
-                result
-            }
-            Err(e) => {
-                error!("Download failed: {}", e);
-                return Err(format!("Download failed: {}", e));
-            }
-        };
+    let download_result = match download_video(window.clone(), url.clone(), output_path.clone()).await {
+        Ok(json_result) => {
+            let video_path = json_result["video_path"].as_str()
+                .ok_or_else(|| "Missing video_path in download result".to_string())?
+                .to_string();
+            let audio_path = json_result["audio_path"].as_str()
+                .ok_or_else(|| "Missing audio_path in download result".to_string())?
+                .to_string();
+            info!("Download completed successfully");
+            info!("  Video path: {}", video_path);
+            info!("  Audio path: {}", audio_path);
+            (video_path, audio_path)
+        }
+        Err(e) => {
+            error!("Download failed: {}", e);
+            return Err(format!("Download failed: {}", e));
+        }
+    };
 
     // Step 2: Transcribe audio
     info!("Step 2: Transcribing audio");
     let transcription_result = match transcribe_audio(
-        download_result.audio_path.clone(),
+        download_result.1.clone(), // audio_path
         output_path.clone(),
         api_key.clone(),
         None, // language - auto detect
         Some(true), // use_word_timestamps - enable word-level timestamps
         window.clone(),
     )
-    .await
-    {
+    .await {
         Ok(result) => {
             info!("Transcription completed successfully");
             info!("  VTT path: {}", result.vtt_path);
@@ -888,8 +778,7 @@ pub async fn process_video(
         api_key.clone(),
         window.clone(),
     )
-    .await
-    {
+    .await {
         Ok(result) => {
             info!("Translation completed successfully");
             info!("  Translated VTT path: {}", result.translated_vtt_path);
@@ -906,8 +795,8 @@ pub async fn process_video(
 
     // Проверяем наличие всех необходимых файлов перед запуском TTS
     for path_str in [
-        &download_result.video_path,
-        &download_result.audio_path,
+        &download_result.0, // video_path
+        &download_result.1, // audio_path
         &transcription_result.vtt_path,
         &translation_result.translated_vtt_path,
     ] {
@@ -929,7 +818,7 @@ pub async fn process_video(
         .map_err(|e| format!("Failed to create TTS directory: {}", e))?;
     
     // Use a filename with correct .wav extension in the tts subdirectory
-    let original_filename = std::path::Path::new(&download_result.video_path)
+    let original_filename = std::path::Path::new(&download_result.0) // video_path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "video".to_string());
@@ -939,8 +828,8 @@ pub async fn process_video(
     info!("TTS output will be saved to: {}", tts_output.display());
 
     let tts_result = generate_speech(
-        download_result.video_path.clone(),
-        download_result.audio_path.clone(),
+        download_result.0.clone(), // video_path
+        download_result.1.clone(), // audio_path
         transcription_result.vtt_path.clone(),
         translation_result.translated_vtt_path.clone(),
         tts_output.to_string_lossy().to_string(),
@@ -953,30 +842,6 @@ pub async fn process_video(
         format!("TTS generation and synchronization failed: {}", e)
     })?;
 
-    // Verify the output file was created
-    let tts_file_path = std::path::Path::new(&tts_result.audio_path);
-    if !tts_file_path.exists() {
-        let error_msg = format!("TTS output file was not created: {}", tts_result.audio_path);
-        error!("{}", error_msg);
-        return Err(error_msg);
-    }
-
-    // Check file size
-    let tts_file_size = tokio::fs::metadata(tts_file_path).await
-        .map(|m| m.len())
-        .map_err(|e| format!("Failed to get file size: {}", e))?;
-
-    if tts_file_size == 0 {
-        let error_msg = format!("TTS output file is empty: {}", tts_result.audio_path);
-        error!("{}", error_msg);
-        return Err(error_msg);
-    }
-
-    info!("TTS file size: {} bytes", tts_file_size);
-    
-    // Step 5: Merge everything together
-    info!("Step 5: Merging video, audio, and subtitles");
-    
     // Create a merged directory
     let merged_dir = PathBuf::from(&output_path).join("merged");
     tokio::fs::create_dir_all(&merged_dir)
@@ -988,9 +853,9 @@ pub async fn process_video(
     let source_language_name = "Original"; // Default
     
     let merge_result = merge_video(
-        download_result.video_path.clone(),
+        download_result.0.clone(), // video_path
         tts_result.audio_path.clone(), // Use the TTS result as the translated audio
-        download_result.audio_path.clone(),
+        download_result.1.clone(), // audio_path
         transcription_result.vtt_path.clone(),
         translation_result.translated_vtt_path.clone(),
         merged_dir.to_string_lossy().to_string(),
@@ -1005,37 +870,18 @@ pub async fn process_video(
         error!("Merging failed: {}", e);
         format!("Merging failed: {}", e)
     })?;
-    
-    // Verify the merged file was created
-    let merged_file_path = std::path::Path::new(&merge_result.merged_video_path);
-    if !merged_file_path.exists() {
-        let error_msg = format!("Merged output file was not created: {}", merge_result.merged_video_path);
-        error!("{}", error_msg);
-        return Err(error_msg);
-    }
-    
-    let merged_file_size = tokio::fs::metadata(merged_file_path).await
-        .map(|m| m.len())
-        .unwrap_or(0);
-    
-    if merged_file_size == 0 {
-        let error_msg = format!("Merged output file is empty: {}", merge_result.merged_video_path);
-        error!("{}", error_msg);
-        return Err(error_msg);
-    }
-    
-    info!("Merged file size: {} bytes", merged_file_size);
+
     info!("=== Video Processing Pipeline Completed Successfully ===");
     info!("Final video saved to: {}", tts_result.audio_path);
     info!("Merged video saved to: {}", merge_result.merged_video_path);
 
     Ok(ProcessVideoResult {
-        video_path: download_result.video_path,
-        audio_path: download_result.audio_path,
+        video_path: download_result.0, // video_path
+        audio_path: download_result.1, // audio_path
         transcription_path: transcription_result.vtt_path,
         translation_path: translation_result.translated_vtt_path,
         tts_path: tts_result.audio_path.clone(),
-        final_path: tts_result.audio_path,  // Используем tts_result вместо final_output
+        final_path: tts_result.audio_path,
         merged_path: merge_result.merged_video_path,
     })
 }
@@ -1105,4 +951,44 @@ pub async fn merge_video(
     Ok(MergeResult {
         merged_video_path: result.to_string_lossy().to_string(),
     })
+}
+
+async fn process_steps(
+    steps: Vec<Step>,
+    output_path: PathBuf,
+    window: tauri::Window,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for step in steps {
+        match step {
+            Step::Download { url } => {
+                info!("Step 1: Downloading video");
+                let download_result = match download_video(window.clone(), url.clone(), output_path.to_string_lossy().to_string()).await {
+                    Ok(result) => {
+                        info!("Download completed successfully");
+                        result
+                    }
+                    Err(e) => {
+                        error!("Download failed: {}", e);
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Download failed: {}", e),
+                        )));
+                    }
+                };
+            }
+            Step::Transcribe => {
+                // TODO: Implement transcribe step
+            }
+            Step::Translate => {
+                // TODO: Implement translate step
+            }
+            Step::GenerateSpeech => {
+                // TODO: Implement speech generation step
+            }
+            Step::Merge => {
+                // TODO: Implement merge step
+            }
+        }
+    }
+    Ok(())
 }

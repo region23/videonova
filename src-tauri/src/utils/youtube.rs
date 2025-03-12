@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use tauri::{Manager, Emitter};
 
 use super::tools::get_tool_path;
 use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
@@ -32,24 +34,47 @@ pub struct DownloadProgress {
     pub component: String, // "audio" or "video"
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Clone)]
 pub struct DownloadResult {
     pub video_path: PathBuf,
     pub audio_path: PathBuf,
 }
 
-/// Download video from YouTube with parallel audio and video processing
+impl DownloadResult {
+    /// Конвертирует пути в строковое представление для frontend
+    pub fn to_frontend_response(&self) -> serde_json::Value {
+        json!({
+            "video_path": self.video_path.to_string_lossy().to_string(),
+            "audio_path": self.audio_path.to_string_lossy().to_string(),
+        })
+    }
+}
+
+/// Shows keychain access information dialog
+async fn show_keychain_info_dialog(window: &tauri::Window) {
+    let _ = window.emit("show_dialog", json!({
+        "title": "Доступ к Keychain",
+        "message": "Для получения информации о видео приложению нужен доступ к cookies YouTube из вашего браузера.\n\n\
+                   Это безопасно: приложение запрашивает только cookies YouTube для авторизации.\n\n\
+                   Пожалуйста, разрешите доступ в появившемся системном диалоге.",
+        "type": "info"
+    }));
+}
+
+/// Download video from YouTube
 pub async fn download_video(
     url: &str,
     output_dir: &PathBuf,
     progress_sender: Option<mpsc::Sender<DownloadProgress>>,
+    cancellation_token: CancellationToken,
+    window: &tauri::Window,
 ) -> Result<DownloadResult> {
     info!("Starting video download process for URL: {}", url);
     debug!("Output directory: {}", output_dir.display());
-
+    
     // Get video info first to get the title
     info!("Fetching video information...");
-    let video_info = get_video_info(url).await?;
+    let video_info = get_video_info(url, window).await?;
     let safe_title = sanitize_filename(&video_info.title);
     info!("Video title: {}", safe_title);
 
@@ -146,40 +171,42 @@ pub async fn download_video(
     });
 
     // Monitor progress from both downloads
-    if let Some(sender) = progress_sender {
-        info!("Setting up progress monitoring...");
-        let cancellation_token_clone = cancellation_token.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    Some(audio_progress) = audio_progress_rx.recv() => {
-                        let mut progress = audio_progress;
-                        progress.component = "audio".to_string();
-                        debug!("Audio progress: {}% at {}", progress.progress, progress.speed.as_deref().unwrap_or("unknown speed"));
+    info!("Setting up progress monitoring...");
+    let cancellation_token_clone = cancellation_token.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Some(audio_progress) = audio_progress_rx.recv() => {
+                    let mut progress = audio_progress;
+                    progress.component = "audio".to_string();
+                    debug!("Audio progress: {}% at {}", progress.progress, progress.speed.as_deref().unwrap_or("unknown speed"));
+                    if let Some(sender) = &progress_sender {
                         if let Err(e) = sender.send(progress).await {
                             error!("Failed to send audio progress: {}", e);
                         }
                     }
-                    Some(video_progress) = video_progress_rx.recv() => {
-                        let mut progress = video_progress;
-                        progress.component = "video".to_string();
-                        debug!("Video progress: {}% at {}", progress.progress, progress.speed.as_deref().unwrap_or("unknown speed"));
+                }
+                Some(video_progress) = video_progress_rx.recv() => {
+                    let mut progress = video_progress;
+                    progress.component = "video".to_string();
+                    debug!("Video progress: {}% at {}", progress.progress, progress.speed.as_deref().unwrap_or("unknown speed"));
+                    if let Some(sender) = &progress_sender {
                         if let Err(e) = sender.send(progress).await {
                             error!("Failed to send video progress: {}", e);
                         }
                     }
-                    _ = cancellation_token_clone.cancelled() => {
-                        debug!("Cancellation requested, stopping progress monitoring");
-                        break;
-                    }
-                    else => {
-                        debug!("Progress channels closed, stopping progress monitoring");
-                        break;
-                    }
+                }
+                _ = cancellation_token_clone.cancelled() => {
+                    debug!("Cancellation requested, stopping progress monitoring");
+                    break;
+                }
+                else => {
+                    debug!("Progress channels closed, stopping progress monitoring");
+                    break;
                 }
             }
-        });
-    }
+        }
+    });
 
     // Wait for both downloads to complete with timeout
     info!("Waiting for downloads to complete...");
@@ -486,36 +513,166 @@ async fn process_download(
 }
 
 /// Get video information without downloading
-pub async fn get_video_info(url: &str) -> Result<VideoInfo> {
-    // Get yt-dlp path
-    let ytdlp_path = get_tool_path("yt-dlp").ok_or_else(|| anyhow!("yt-dlp not found"))?;
+pub async fn get_video_info(url: &str, window: &tauri::Window) -> Result<VideoInfo> {
+    info!("Getting video info for URL: {}", url);
 
-    // Prepare command to get video info in JSON format
-    let output = Command::new(ytdlp_path)
-        .arg(url)
-        .arg("--dump-json")
-        .arg("--no-playlist")
-        .output()?;
-
-    if !output.status.success() {
-        return Err(anyhow!("Failed to get video info"));
+    // Basic URL validation
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        error!("Invalid URL format: {}", url);
+        return Err(anyhow!("Invalid URL format. URL must start with http:// or https://"));
     }
 
-    // Parse JSON output
-    let json = String::from_utf8_lossy(&output.stdout);
-    let info: serde_json::Value = serde_json::from_str(&json)?;
+    // Get yt-dlp path
+    let ytdlp_path = get_tool_path("yt-dlp").ok_or_else(|| {
+        error!("yt-dlp not found in system");
+        anyhow!("yt-dlp not found. Please ensure it is installed correctly.")
+    })?;
 
-    debug!("Video metadata: {}", json);
+    debug!("Using yt-dlp from path: {}", ytdlp_path.display());
 
-    Ok(VideoInfo {
-        title: info["title"].as_str().unwrap_or("Unknown").to_string(),
-        duration: info["duration"].as_f64().unwrap_or(0.0),
-        url: url.to_string(),
-        thumbnail: info["thumbnail"].as_str().unwrap_or("").to_string(),
-        description: info["description"].as_str().unwrap_or("").to_string(),
-        language: info["language"].as_str().map(|s| s.to_string()),
-        original_language: info["original_language"].as_str().map(|s| s.to_string()),
-    })
+    let mut tried_browsers = Vec::new();
+    let mut showed_keychain_info = false;
+    
+    // Try up to 3 times with increasing delays
+    for attempt in 1..=3 {
+        info!("Attempt {} to get video info", attempt);
+
+        // Try different browsers in sequence
+        let browsers = if attempt == 1 {
+            let mut browsers = vec!["chrome", "firefox"];
+            #[cfg(target_os = "macos")]
+            browsers.push("safari");
+            browsers
+        } else {
+            vec!["chrome"]  // On retry attempts, just use Chrome
+        };
+
+        for browser in browsers {
+            if tried_browsers.contains(&browser) {
+                continue;
+            }
+            tried_browsers.push(browser);
+            
+            // Show keychain access info dialog before first browser attempt
+            if !showed_keychain_info {
+                show_keychain_info_dialog(window).await;
+                showed_keychain_info = true;
+                // Небольшая пауза, чтобы пользователь успел прочитать сообщение
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+            
+            info!("Trying with {} cookies...", browser);
+            let mut command = Command::new(&ytdlp_path);
+            command
+                .arg(url)
+                .arg("--dump-json")
+                .arg("--no-playlist")
+                .arg("--no-warnings")
+                .arg("--ignore-config")
+                .arg("--no-check-certificates")
+                .arg("--cookies-from-browser")
+                .arg(browser)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+
+            debug!("Executing command: {:?}", command);
+
+            match command.output() {
+                Ok(browser_output) => {
+                    if browser_output.status.success() {
+                        debug!("Successfully retrieved info using {} cookies", browser);
+                        
+                        // Parse JSON output
+                        let json = match String::from_utf8(browser_output.stdout) {
+                            Ok(json) => json,
+                            Err(e) => {
+                                error!("Failed to decode yt-dlp output as UTF-8: {}", e);
+                                continue;
+                            }
+                        };
+
+                        debug!("Received video metadata: {}", json);
+
+                        // Parse JSON into serde_json::Value
+                        let info: serde_json::Value = match serde_json::from_str(&json) {
+                            Ok(info) => info,
+                            Err(e) => {
+                                error!("Failed to parse JSON from yt-dlp: {}", e);
+                                continue;
+                            }
+                        };
+
+                        // Extract required fields with detailed error messages
+                        let title = match info["title"].as_str() {
+                            Some(t) => t.to_string(),
+                            None => {
+                                error!("Missing or invalid title in video info");
+                                continue;
+                            }
+                        };
+
+                        let duration = match info["duration"].as_f64() {
+                            Some(d) => d,
+                            None => {
+                                error!("Missing or invalid duration in video info");
+                                continue;
+                            }
+                        };
+
+                        let thumbnail = info["thumbnail"].as_str().unwrap_or("").to_string();
+                        let description = info["description"].as_str().unwrap_or("").to_string();
+                        let language = info["language"].as_str().map(|s| s.to_string());
+                        let original_language = info["original_language"].as_str().map(|s| s.to_string());
+
+                        info!("Successfully retrieved video info for: {}", title);
+                        debug!("Video duration: {}s", duration);
+
+                        return Ok(VideoInfo {
+                            title,
+                            duration,
+                            url: url.to_string(),
+                            thumbnail,
+                            description,
+                            language,
+                            original_language,
+                        });
+                    } else {
+                        let stderr = String::from_utf8_lossy(&browser_output.stderr);
+                        error!("Failed with {} cookies: {}", browser, stderr);
+
+                        // Check for specific error conditions
+                        if stderr.contains("Video unavailable") {
+                            return Err(anyhow!("Видео недоступно. Возможно оно приватное или было удалено."));
+                        } else if stderr.contains("This video is not available in your country") {
+                            return Err(anyhow!("Это видео недоступно в вашей стране."));
+                        } else if stderr.contains("Sign in to confirm your age") {
+                            return Err(anyhow!("Видео имеет возрастные ограничения. Пожалуйста, войдите в свой аккаунт YouTube в браузере."));
+                        }
+                    }
+                }
+                Err(e) => error!("Error trying {} cookies: {}", browser, e),
+            }
+        }
+
+        if attempt < 3 {
+            let delay = std::time::Duration::from_secs(attempt as u64);
+            warn!("Retrying in {} seconds...", delay.as_secs());
+            std::thread::sleep(delay);
+            continue;
+        }
+    }
+
+    // If we get here, all attempts with all browsers failed
+    let tried_browsers_str = tried_browsers.join(", ");
+    Err(anyhow!(
+        "Не удалось получить информацию о видео. YouTube требует авторизацию.\n\n\
+        Пожалуйста:\n\
+        1. Войдите в свой аккаунт YouTube в одном из браузеров ({}).\n\
+        2. Откройте YouTube и просмотрите любое видео для обновления cookies.\n\
+        3. Попробуйте снова.\n\n\
+        Если проблема сохраняется, попробуйте использовать другой браузер.",
+        tried_browsers_str
+    ))
 }
 
 /// Parse progress information from yt-dlp output

@@ -5,14 +5,23 @@
 //! Эта библиотека выполняет следующие задачи:
 //! 1. Парсинг VTT-субтитров для получения таймингов и текста.
 //! 2. Генерация аудиофрагментов через OpenAI TTS API (с параметризируемой конфигурацией).
-//! 3. Декодирование аудио в PCM (f32) с помощью symphonia/hound.
-//! 4. Корректировка длительности фрагментов с помощью rubato, чтобы итоговая длительность каждого фрагмента стала равной целевому интервалу (без обрезки).
-//! 5. Склейка фрагментов с применением fade‑in/fade‑out для устранения щелчков.
-//! 6. Нормализация громкости: если указан путь к исходному аудио (mp3/m4a), итоговое аудио приводится к такому же уровню.
-//! 7. Кодирование итогового аудио в WAV.
-//! 8. Асинхронная передача обновлений прогресса выполнения.
+//! 3. Декодирование аудио в PCM (f32) с помощью ffmpeg и hound.
+//! 4. Адаптивная корректировка длительности фрагментов с помощью SoundTouch:
+//!    - Интеллектуальное изменение темпа с сохранением высоты тона
+//!    - Разное сжатие для речи и тишины
+//!    - Специальная обработка для экстремального сжатия (>3x)
+//! 5. Точная синхронизация с контрольными точками для минимизации накопления ошибок.
+//! 6. Нормализация громкости:
+//!    - По исходному аудио (если указан путь к mp3/m4a)
+//!    - Стандартная нормализация к целевому уровню (если исходное аудио не указано)
+//! 7. Сохранение промежуточных результатов для отладки:
+//!    - MP3 фрагменты от TTS API
+//!    - WAV файлы после коррекции длительности
+//!    - Информация о каждом фрагменте
+//!    - Копии финального аудио на разных этапах
+//! 8. Асинхронная передача детальных обновлений о прогрессе выполнения.
 //!
-//! **Замечание:** Для полноценного использования потребуется доработка обработки ошибок и параметризация DSP‑алгоритмов.
+//! **Замечание:** Библиотека требует установленного SoundTouch и ffmpeg для работы.
 
 use std::path::Path;
 use std::process::Command;
@@ -602,14 +611,165 @@ pub mod audio {
         num_samples as f32 / sample_rate as f32
     }
 
-    /// Применяет time-stretching к аудио для корректировки длительности.
-    ///
-    /// Если actual_duration > target_duration, вычисляется коэффициент ускорения:
-    /// speed_factor = actual_duration / target_duration (с ограничением сверху),
-    /// затем SoundTouch обрабатывает аудио чтобы итоговая длительность приблизилась к target_duration,
-    /// сохраняя при этом высоту тона.
-    ///
-    /// Если actual_duration < target_duration, просто добавляем тишину.
+    /// Detects speech vs. silence regions in audio samples
+    fn detect_speech_regions(samples: &[f32], sample_rate: u32, silence_threshold: f32) -> Vec<(usize, usize, bool)> {
+        let window_size = (sample_rate as f32 * 0.02).round() as usize; // 20ms window
+        let mut regions = Vec::new();
+        let mut is_speech = false;
+        let mut region_start = 0;
+        
+        // Analyze audio in small windows
+        for i in (0..samples.len()).step_by(window_size) {
+            let end = (i + window_size).min(samples.len());
+            let window = &samples[i..end];
+            
+            // Calculate RMS energy in this window
+            let rms = compute_rms(window);
+            let is_current_speech = rms > silence_threshold;
+            
+            // State change detection
+            if is_current_speech != is_speech {
+                // End previous region
+                if i > 0 {
+                    regions.push((region_start, i, is_speech));
+                }
+                // Start new region
+                region_start = i;
+                is_speech = is_current_speech;
+            }
+        }
+        
+        // Add final region if needed
+        if region_start < samples.len() {
+            regions.push((region_start, samples.len(), is_speech));
+        }
+        
+        debug!("Detected {} speech/silence regions", regions.len());
+        regions
+    }
+
+    /// Applies advanced time-stretching with non-uniform distribution
+    /// Stretches silence regions more aggressively than speech regions
+    pub fn adaptive_time_stretch(
+        input: &[f32], 
+        actual_duration: f32, 
+        target_duration: f32, 
+        sample_rate: u32,
+        config: &AudioProcessingConfig
+    ) -> Result<Vec<f32>> {
+        info!("Applying adaptive time-stretching: actual={:.3}s, target={:.3}s", 
+              actual_duration, target_duration);
+        
+        if actual_duration <= target_duration {
+            let target_samples = (target_duration * sample_rate as f32).round() as usize;
+            let mut output = input.to_vec();
+            if output.len() < target_samples {
+                let silence_samples = target_samples - output.len();
+                let prefix_silence = silence_samples / 3;
+                let suffix_silence = silence_samples - prefix_silence;
+                
+                let mut new_output = vec![0.0; target_samples];
+                new_output[prefix_silence..prefix_silence + output.len()].copy_from_slice(&output);
+                output = new_output;
+            }
+            return Ok(output);
+        }
+
+        // Detect speech/silence regions with original threshold
+        let silence_threshold = 0.01; // Restored original threshold
+        let regions = detect_speech_regions(input, sample_rate, silence_threshold);
+        
+        if regions.is_empty() {
+            warn!("No speech/silence regions detected, falling back to uniform time-stretching");
+            return super::soundtouch::process_with_soundtouch(
+                input, 
+                sample_rate, 
+                actual_duration / target_duration
+            );
+        }
+        
+        // Calculate how much total time we need to remove
+        let time_to_remove = actual_duration - target_duration;
+        
+        // Calculate total duration of silence vs speech
+        let mut silence_duration = 0.0;
+        let mut speech_duration = 0.0;
+        
+        for (start, end, is_speech) in &regions {
+            let region_duration = (*end - *start) as f32 / sample_rate as f32;
+            if *is_speech {
+                speech_duration += region_duration;
+            } else {
+                silence_duration += region_duration;
+            }
+        }
+        
+        // Determine stretch factors using original logic
+        let (silence_factor, speech_factor) = if silence_duration > 0.0 {
+            // Try to remove most time from silence, but not more than 80% of silence
+            let max_silence_reduction = silence_duration * 0.8;
+            
+            if max_silence_reduction >= time_to_remove {
+                // We can remove all needed time from silence
+                let silence_compression = silence_duration / (silence_duration - time_to_remove);
+                (silence_compression, 1.0) // Don't compress speech at all
+            } else {
+                // Remove what we can from silence, and the rest from speech
+                let remaining_time = time_to_remove - max_silence_reduction;
+                let silence_compression = 3.0; // Original max silence compression
+                let speech_compression = speech_duration / (speech_duration - remaining_time);
+                (silence_compression, speech_compression)
+            }
+        } else {
+            // No silence, compress speech uniformly
+            (1.0, actual_duration / target_duration)
+        };
+        
+        info!("Adaptive factors: silence={:.2}, speech={:.2}", silence_factor, speech_factor);
+        
+        // Apply stretching to regions
+        let mut output = Vec::new();
+        
+        for (start, end, is_speech) in regions {
+            let region = &input[start..end];
+            let factor = if is_speech { speech_factor } else { silence_factor };
+            
+            // Skip processing for regions with factor close to 1.0
+            if (factor - 1.0).abs() < 0.05 {
+                output.extend_from_slice(region);
+                continue;
+            }
+            
+            let processed = super::soundtouch::process_with_soundtouch(
+                region, 
+                sample_rate, 
+                factor
+            )?;
+            
+            output.extend(processed);
+        }
+
+        // Final length adjustment if needed
+        let target_samples = (target_duration * sample_rate as f32).round() as usize;
+        if output.len() > target_samples {
+            output.truncate(target_samples);
+        } else if output.len() < target_samples {
+            output.extend(vec![0.0; target_samples - output.len()]);
+        }
+        
+        Ok(output)
+    }
+
+    /// Вычисляет RMS-уровень (корень из среднего квадрата) для набора сэмплов.
+    pub fn compute_rms(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+        (sum_sq / samples.len() as f32).sqrt()
+    }
+
+    /// Applies time-stretching to audio for duration adjustment with improved algorithm.
     pub fn adjust_duration(
         input: &[f32],
         actual_duration: f32,
@@ -618,17 +778,22 @@ pub mod audio {
         config: &AudioProcessingConfig,
     ) -> Result<Vec<f32>> {
         if input.is_empty() {
-            warn!("adjust_duration получил пустой входной аудиомассив!");
-            return Err(TtsError::AudioProcessingError("Попытка обработать пустое аудио".to_string()));
+            warn!("adjust_duration received empty input audio!");
+            return Err(TtsError::AudioProcessingError("Attempt to process empty audio".to_string()));
         }
 
-        info!("Применение time-stretching: входное аудио {} сэмплов, actual_duration={:.3}s, target_duration={:.3}s, factor={:.3}", 
+        if target_duration <= 0.0 {
+            warn!("Invalid target duration: {:.3}s, using actual duration instead", target_duration);
+            return Ok(input.to_vec());
+        }
+
+        info!("Applying time-stretching: input audio {} samples, actual_duration={:.3}s, target_duration={:.3}s, factor={:.3}", 
               input.len(), actual_duration, target_duration, actual_duration / target_duration);
         
-        // Проверяем, что аудио не является тишиной
+        // Check if audio is silence
         let max_amplitude = input.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
         if max_amplitude < 0.001 {
-            warn!("Входное аудио имеет очень низкую амплитуду: {:.6}, возможно это тишина. Просто добавляем тишину.", max_amplitude);
+            warn!("Input audio has very low amplitude: {:.6}, possibly silence. Just adding silence.", max_amplitude);
             let target_samples = (target_duration * sample_rate as f32).round() as usize;
             let mut output = input.to_vec();
             if output.len() < target_samples {
@@ -638,10 +803,63 @@ pub mod audio {
             }
             return Ok(output);
         }
+
+        // Special handling for very short phrases (less than 1 second or few words)
+        let is_short_phrase = actual_duration < 1.0;
+        if is_short_phrase {
+            info!("Short phrase detected ({:.3}s), using minimal time adjustment", actual_duration);
+            
+            if actual_duration > target_duration {
+                // For compression, use very mild stretching to preserve speech quality
+                let max_compression = 1.2; // Limit compression for short phrases
+                let stretch_factor = (actual_duration / target_duration).min(max_compression);
+                
+                if stretch_factor > 1.05 {
+                    // Only apply stretching if factor is significant
+                    let processed = super::soundtouch::process_with_soundtouch(
+                        input, 
+                        sample_rate,
+                        stretch_factor
+                    )?;
+                    
+                    // If still too long, trim the end gradually
+                    let target_samples = (target_duration * sample_rate as f32).round() as usize;
+                    if processed.len() > target_samples {
+                        let mut output = processed;
+                        // Apply fade out to last 10ms
+                        let fade_samples = (0.01 * sample_rate as f32) as usize;
+                        let fade_start = target_samples.saturating_sub(fade_samples);
+                        for i in fade_start..target_samples {
+                            let factor = (target_samples - i) as f32 / fade_samples as f32;
+                            if i < output.len() {
+                                output[i] *= factor;
+                            }
+                        }
+                        output.truncate(target_samples);
+                        return Ok(output);
+                    }
+                    return Ok(processed);
+                }
+            }
+            
+            // For extension or minimal compression, just add silence
+            let target_samples = (target_duration * sample_rate as f32).round() as usize;
+            let mut output = input.to_vec();
+            
+            if output.len() != target_samples {
+                let mut new_output = vec![0.0; target_samples];
+                // Center the audio with slightly more silence at the end
+                let prefix_silence = ((target_samples - output.len()) as f32 * 0.4) as usize;
+                new_output[prefix_silence..prefix_silence + output.len()].copy_from_slice(&output);
+                return Ok(new_output);
+            }
+            
+            return Ok(output);
+        }
         
-        // Безопасная версия - просто добавляем тишину без изменения темпа, если аудио слишком короткое
+        // Safe version - just add silence without changing tempo if audio is too short
         if input.len() < 100 || actual_duration < 0.1 || target_duration < 0.1 {
-            warn!("Слишком короткое аудио для time-stretching: {} сэмплов, {:.3}s -> {:.3}s, добавляем тишину", 
+            warn!("Audio too short for time-stretching: {} samples, {:.3}s -> {:.3}s, adding silence", 
                   input.len(), actual_duration, target_duration);
             let target_samples = (target_duration * sample_rate as f32).round() as usize;
             let mut output = input.to_vec();
@@ -654,150 +872,27 @@ pub mod audio {
         }
 
         if actual_duration > target_duration {
-            // Случай 1: Аудио нужно ускорить
-            let speed_factor = actual_duration / target_duration;
-            
-            // Защита от слишком агрессивного ускорения
-            let adjusted_speed_factor = if speed_factor > 3.0 {
-                warn!("Очень высокий коэффициент ускорения ({:.2}), ограничиваем до 3.0", speed_factor);
-                3.0
-            } else {
-                speed_factor
-            };
-            
-            // Используем SoundTouch для изменения скорости с сохранением высоты тона
-            match super::soundtouch::process_with_soundtouch(input, sample_rate, adjusted_speed_factor) {
-                Ok(processed) => {
-                    info!("Итоговое аудио после изменения скорости с сохранением тона через SoundTouch: {} сэмплов, длительность ~{:.3}s",
-                          processed.len(), processed.len() as f32 / sample_rate as f32);
-                    
-                    // Проверим что результат не пустой
-                    if processed.is_empty() {
-                        warn!("SoundTouch вернул пустой результат! Используем оригинальное аудио с обрезкой.");
-                        let target_samples = (target_duration * sample_rate as f32).round() as usize;
-                        return Ok(input.iter().take(target_samples).cloned().collect());
-                    }
-                    
-                    // Проверяем, что длительность соответствует ожидаемой
-                    let result_duration = processed.len() as f32 / sample_rate as f32;
-                    let target_samples = (target_duration * sample_rate as f32).round() as usize;
-                    
-                    if (result_duration - target_duration).abs() > 0.1 {
-                        warn!("Результат обработки имеет неожиданную длительность: {:.3}s вместо {:.3}s", 
-                              result_duration, target_duration);
-                        
-                        // Корректируем длину, если нужно
-                        let mut adjusted_result = processed;
-                        if adjusted_result.len() > target_samples {
-                            adjusted_result.truncate(target_samples);
-                        } else if adjusted_result.len() < target_samples {
-                            adjusted_result.extend(vec![0.0; target_samples - adjusted_result.len()]);
-                        }
-                        
-                        Ok(adjusted_result)
-                    } else {
-                        Ok(processed)
-                    }
-                },
-                Err(e) => {
-                    error!("Ошибка при обработке аудио через SoundTouch: {}", e);
-                    
-                    // Предлагаем альтернативу в случае ошибки - попробуем использовать Rubato
-                    warn!("Пробуем использовать резервный метод time-stretching (Rubato FFT)");
-                    
-                    // Используем FftFixedIn для изменения длительности с сохранением высоты тона
-                    let mut resampler = match rubato::FftFixedIn::<f32>::new(
-                        sample_rate as usize,                 // Исходная частота дискретизации
-                        (sample_rate as f64 / adjusted_speed_factor as f64) as usize, // Целевая частота дискретизации
-                        input.len(),                          // Размер входного буфера
-                        config.window_size / config.hop_size, // Количество подблоков для обработки
-                        1                                     // Количество каналов (моно)
-                    ) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            error!("Ошибка создания FFT-ресемплера: {}", e);
-                            return Err(TtsError::TimeStretchingError(format!("Ошибка создания FFT-ресемплера: {}", e)));
-                        }
-                    };
-                    
-                    // Подготавливаем входные данные
-                    let input_frames = vec![input.to_vec()];
-                    
-                    // Обрабатываем аудио с сохранением высоты тона
-                    let output_frames = match resampler.process(&input_frames, None) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            error!("Ошибка обработки аудио через Rubato: {}", e);
-                            // Безопасная альтернатива - просто обрезаем аудио
-                            let target_samples = (target_duration * sample_rate as f32).round() as usize;
-                            return Ok(input.iter().take(target_samples).cloned().collect());
-                        }
-                    };
-                    
-                    // Получаем результат (первый и единственный канал)
-                    let result = output_frames[0].clone();
-                    
-                    info!("Итоговое аудио после изменения скорости с сохранением тона через Rubato: {} сэмплов, длительность ~{:.3}s",
-                          result.len(), result.len() as f32 / sample_rate as f32);
-                    
-                    // Проверяем, что длительность соответствует ожидаемой
-                    let result_duration = result.len() as f32 / sample_rate as f32;
-                    let target_samples = (target_duration * sample_rate as f32).round() as usize;
-                    
-                    if (result_duration - target_duration).abs() > 0.1 {
-                        // Корректируем длину, если нужно
-                        let mut adjusted_result = result;
-                        if adjusted_result.len() > target_samples {
-                            adjusted_result.truncate(target_samples);
-                        } else if adjusted_result.len() < target_samples {
-                            adjusted_result.extend(vec![0.0; target_samples - adjusted_result.len()]);
-                        }
-                        
-                        Ok(adjusted_result)
-                    } else {
-                        Ok(result)
-                    }
-                }
-            }
+            // Case 1: Audio needs to be sped up (using adaptive algorithm)
+            adaptive_time_stretch(input, actual_duration, target_duration, sample_rate, config)
         } else {
-            // Случай 2: Аудио короче целевого - просто добавляем тишину
+            // Case 2: Audio is shorter than target - add silence more intelligently
             let target_samples = (target_duration * sample_rate as f32).round() as usize;
             let mut output = input.to_vec();
+            
             if output.len() < target_samples {
-                output.extend(vec![0.0; target_samples - output.len()]);
+                // Add 1/3 of the silence at the beginning and 2/3 at the end for more natural timing
+                let silence_samples = target_samples - output.len();
+                let prefix_silence = silence_samples / 3;
+                let suffix_silence = silence_samples - prefix_silence;
+                
+                let mut new_output = vec![0.0; target_samples];
+                new_output[prefix_silence..prefix_silence + output.len()].copy_from_slice(&output);
+                
+                return Ok(new_output);
             }
+            
             Ok(output)
         }
-    }
-
-    /// Применяет короткие fade-in и fade-out (в миллисекундах) к аудиофрагменту для сглаживания границ.
-    pub fn apply_fades(input: &[f32], sample_rate: u32, fade_ms: u32) -> Vec<f32> {
-        let fade_samples = (sample_rate as f32 * fade_ms as f32 / 1000.0).round() as usize;
-        let mut output = input.to_vec();
-
-        // Применяем fade-in
-        for i in 0..fade_samples.min(output.len()) {
-            let factor = i as f32 / fade_samples as f32;
-            output[i] *= factor;
-        }
-        
-        // Применяем fade-out
-        for i in 0..fade_samples.min(output.len()) {
-            let idx = output.len() - 1 - i;
-            let factor = i as f32 / fade_samples as f32;
-            output[idx] *= factor;
-        }
-        
-        output
-    }
-
-    /// Вычисляет RMS-уровень (корень из среднего квадрата) для набора сэмплов.
-    pub fn compute_rms(samples: &[f32]) -> f32 {
-        if samples.is_empty() {
-            return 0.0;
-        }
-        let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
-        (sum_sq / samples.len() as f32).sqrt()
     }
 }
 
@@ -854,6 +949,58 @@ pub mod synchronizer {
         }
     }
 
+    /// Структура для отслеживания синхронизации
+    #[derive(Debug)]
+    struct SyncState {
+        expected_duration: f32,
+        actual_duration: f32,
+        cumulative_error: f32,
+        last_checkpoint: f32,
+    }
+
+    impl SyncState {
+        fn new() -> Self {
+            Self {
+                expected_duration: 0.0,
+                actual_duration: 0.0,
+                cumulative_error: 0.0,
+                last_checkpoint: 0.0,
+            }
+        }
+
+        fn update(&mut self, expected: f32, actual: f32) {
+            self.expected_duration += expected;
+            self.actual_duration += actual;
+            self.cumulative_error = self.actual_duration - self.expected_duration;
+        }
+
+        fn needs_correction(&self) -> bool {
+            self.cumulative_error.abs() > 0.1 // Коррекция при ошибке более 100мс
+        }
+
+        fn get_correction_factor(&self) -> f32 {
+            if self.needs_correction() {
+                // Вычисляем фактор коррекции для следующего сегмента
+                let remaining_expected = self.expected_duration - self.last_checkpoint;
+                if remaining_expected > 0.0 {
+                    (remaining_expected - self.cumulative_error) / remaining_expected
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            }
+        }
+
+        fn checkpoint(&mut self) {
+            self.last_checkpoint = self.expected_duration;
+            // Сбрасываем накопленную ошибку при достижении контрольной точки
+            if self.cumulative_error.abs() < 0.05 {
+                self.cumulative_error = 0.0;
+            }
+        }
+    }
+
     /// Выполняет полный процесс синхронизации:
     /// - Парсинг VTT
     /// - Генерация аудио через TTS API
@@ -890,183 +1037,200 @@ pub mod synchronizer {
         }
 
         // 2. Генерация TTS для каждой реплики параллельно
-        let tts_futures = cues.iter().enumerate().map(|(i, cue)| {
-            let api_key = config.api_key;
-            let text = cue.text.clone();
-            let tts_config = &config.tts_config;
-            async move {
-                let res = tts::generate_tts(api_key, &text, tts_config).await;
-                (i, res)
+        let tts_futures = cues.iter().enumerate().filter_map(|(i, cue)| {
+            // Пропускаем пустые сегменты
+            if cue.text.trim().is_empty() {
+                info!("Пропускаем пустой сегмент #{} ({}s -> {}s)", i, cue.start, cue.end);
+                None
+            } else {
+                let api_key = config.api_key;
+                let text = cue.text.clone();
+                let tts_config = &config.tts_config;
+                Some(async move {
+                    let res = tts::generate_tts(api_key, &text, tts_config).await;
+                    (i, res)
+                })
             }
         });
         let tts_results = join_all(tts_futures).await;
         let mut audio_fragments = Vec::new();
 
-        // 3. Обработка каждого аудиофрагмента
-        for (i, (cue, tts_result)) in cues.iter().zip(tts_results.into_iter()).enumerate() {
+        let mut sync_state = SyncState::new();
+        let checkpoint_interval = 10.0; // Контрольная точка каждые 10 секунд
+        let mut next_checkpoint = checkpoint_interval;
+        let mut current_time = 0.0;
+
+        // 3. Обработка каждого аудиофрагмента с учетом синхронизации
+        let mut prev_end: Option<f32> = None;
+        for (i, cue) in cues.iter().enumerate() {
             send_progress(&config.progress_sender, ProgressUpdate::TTSGeneration { current: i + 1, total: cues.len() }).await;
             
-            // Обрабатываем результат генерации TTS
-            let (audio_bytes, text) = tts_result.1?;
-            
-            // Получаем имя видео из пути к выходному файлу
-            let base_filename = config.output_wav
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("output")
-                .to_string();
-            
-            // Формируем имя файла без текста субтитров - только номер чанка и имя видео
-            let chunk_name = format!("chunk_{:03}_{}", i, base_filename);
-            
-            let chunk_path = debug_dir.join(format!("{}.mp3", chunk_name));
-            std::fs::write(&chunk_path, &audio_bytes)
-                .map_err(|e| TtsError::IoError(e))?;
-            
-            info!("Сохранен MP3-чанк №{}: {} байт, путь: {}", i, audio_bytes.len(), chunk_path.display());
-            
-            // Проверяем размер аудио-чанка
-            if audio_bytes.len() < 100 {
-                warn!("Слишком маленький размер MP3-чанка №{}: {} байт. Текст: {}", i, audio_bytes.len(), text);
-                // Создаем файл с ошибкой и продолжаем со следующим фрагментом
-                let error_path = debug_dir.join(format!("{}_ERROR_TOO_SMALL.txt", chunk_name));
-                let error_info = format!("Слишком маленький размер MP3: {} байт\nТекст: {}", audio_bytes.len(), text);
-                std::fs::write(error_path, error_info)
-                    .map_err(|e| TtsError::IoError(e))?;
-                continue;
+            // Проверяем стык с предыдущим сегментом
+            if let Some(prev_end_time) = prev_end {
+                let gap = cue.start - prev_end_time;
+                if gap.abs() < 0.001 { // Если разница меньше 1мс, считаем что сегменты смежные
+                    info!("Обнаружены смежные сегменты на {:.3}s", cue.start);
+                } else if gap < 0.0 {
+                    warn!("Обнаружено наложение сегментов на {:.3}s: overlap={:.3}s", cue.start, -gap);
+                } else if gap > 0.0 {
+                    info!("Обнаружен разрыв между сегментами на {:.3}s: gap={:.3}s", cue.start, gap);
+                }
             }
+            prev_end = Some(cue.end);
             
-            // Продолжаем обычную обработку
-            let decode_result = audio::decode_mp3(&audio_bytes);
-            let (pcm, sample_rate) = match decode_result {
-                Ok(result) => result,
-                Err(e) => {
-                    error!("Ошибка декодирования MP3-чанка №{}: {}. Текст: {}", i, e, text);
-                    // Создаем placeholder для продолжения обработки
-                    let placeholder_path = debug_dir.join(format!("{}_ERROR.txt", chunk_name));
-                    let error_info = format!("Ошибка декодирования: {}\nРазмер чанка: {} байт\nТекст: {}", 
-                                           e, audio_bytes.len(), text);
-                    std::fs::write(placeholder_path, error_info)
-                        .map_err(|e| TtsError::IoError(e))?;
-                        
-                    // Пропускаем этот фрагмент и продолжаем со следующим
+            // Для пустых сегментов создаем тишину
+            if cue.text.trim().is_empty() {
+                let target_duration = cue.end - cue.start;
+                if target_duration <= 0.0 {
+                    warn!("Пропускаем сегмент с некорректной длительностью: start={:.3}s, end={:.3}s", cue.start, cue.end);
                     continue;
                 }
-            };
-            
-            // Проверяем декодированное аудио на пустоту и уровень
-            if pcm.is_empty() {
-                warn!("Пустое декодированное аудио для чанка №{}. Текст: {}", i, text);
-                let error_path = debug_dir.join(format!("{}_ERROR_EMPTY_PCM.txt", chunk_name));
-                let error_info = format!("Пустое декодированное аудио\nРазмер MP3: {} байт\nТекст: {}", audio_bytes.len(), text);
-                std::fs::write(error_path, error_info)
-                    .map_err(|e| TtsError::IoError(e))?;
+                let silence_samples = (target_duration * 44100.0) as usize;
+                let silence = vec![0.0; silence_samples];
+                audio_fragments.push((silence, 44100, String::from("[silence]")));
                 continue;
             }
             
-            // Проверяем уровень аудио
-            let max_amplitude = pcm.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
-            if max_amplitude < 0.001 {
-                warn!("Очень низкий уровень аудио для чанка №{}: {:.6}. Текст: {}", i, max_amplitude, text);
-                // Продолжаем обработку, но записываем предупреждение
-                let warning_path = debug_dir.join(format!("{}_WARNING_LOW_LEVEL.txt", chunk_name));
-                let warning_info = format!("Низкий уровень аудио: {:.6}\nРазмер MP3: {} байт\nТекст: {}", 
-                                         max_amplitude, audio_bytes.len(), text);
-                std::fs::write(warning_path, warning_info)
-                    .map_err(|e| TtsError::IoError(e))?;
-            }
+            // Ищем результат TTS для этого сегмента
+            let tts_result = tts_results.iter().find(|(idx, _)| *idx == i);
             
-            let actual_duration = audio::duration_in_seconds(pcm.len(), sample_rate);
-            let target_duration = cue.end - cue.start;
-            
-            // Сохраняем WAV после декодирования для отладки
-            let wav_path = debug_dir.join(format!("{}_decoded.wav", chunk_name));
-            if let Err(e) = audio::encode_wav(&pcm, sample_rate, wav_path.to_str().unwrap()) {
-                warn!("Не удалось сохранить декодированный WAV для чанка №{}: {}", i, e);
-            }
-            
-            send_progress(
-                &config.progress_sender,
-                ProgressUpdate::ProcessingFragment {
-                    index: i + 1,
-                    total: cues.len(),
-                    step: format!("Длительность: target {:.3} s, actual {:.3} s", target_duration, actual_duration),
-                },
-            )
-            .await;
-            
-            // Крайний случай: если целевая длительность слишком маленькая, просто добавляем короткую тишину
-            let adjusted = if target_duration < 0.05 {
-                warn!("Очень короткая целевая длительность для чанка №{}: {:.3}s, пропускаем time-stretching", i, target_duration);
-                let target_samples = (target_duration * sample_rate as f32).round() as usize;
-                // Генерируем короткий сигнал с затуханием
-                let mut short_signal = vec![0.0f32; target_samples];
-                if !pcm.is_empty() {
-                    // Копируем начало исходного аудио с затуханием
-                    let copy_len = target_samples.min(pcm.len());
-                    for j in 0..copy_len {
-                        let fade = 1.0 - (j as f32 / copy_len as f32);
-                        short_signal[j] = pcm[j] * fade;
-                    }
-                }
-                short_signal
-            } else {
-                // Обычная корректировка длительности
-                match audio::adjust_duration(&pcm, actual_duration, target_duration, sample_rate, &config.audio_config) {
-                    Ok(adjusted) => adjusted,
+            if let Some((_, result)) = tts_result {
+                let (audio_bytes, text) = match result {
+                    Ok(res) => res,
                     Err(e) => {
-                        error!("Ошибка при корректировке длительности чанка №{}: {}. Используем исходное аудио с добавлением тишины.", i, e);
-                        // Создаем безопасную альтернативу
-                        let target_samples = (target_duration * sample_rate as f32).round() as usize;
-                        let mut safe_output = pcm.clone();
-                        if safe_output.len() > target_samples {
-                            // Если исходное аудио длиннее целевого, обрезаем
-                            safe_output.truncate(target_samples);
-                        } else if safe_output.len() < target_samples {
-                            // Если короче, добавляем тишину
-                            safe_output.extend(vec![0.0; target_samples - safe_output.len()]);
-                        }
-                        safe_output
+                        error!("Ошибка генерации TTS для сегмента #{}: {}", i, e);
+                        return Err(TtsError::OpenAiApiError(e.to_string()));
                     }
+                };
+                
+                // Получаем имя видео из пути к выходному файлу
+                let base_filename = config.output_wav
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("output")
+                    .to_string();
+                
+                // Формируем имя файла без текста субтитров - только номер чанка и имя видео
+                let chunk_name = format!("chunk_{:03}_{}", i, base_filename);
+                
+                let chunk_path = debug_dir.join(format!("{}.mp3", chunk_name));
+                std::fs::write(&chunk_path, &audio_bytes)
+                    .map_err(|e| TtsError::IoError(e))?;
+                
+                info!("Сохранен MP3-чанк №{}: {} байт, путь: {}", i, audio_bytes.len(), chunk_path.display());
+                
+                // Проверяем размер аудио-чанка
+                if audio_bytes.len() < 100 {
+                    warn!("Слишком маленький размер MP3-чанка №{}: {} байт. Текст: {}", i, audio_bytes.len(), text);
+                    // Создаем файл с ошибкой и продолжаем со следующим фрагментом
+                    let error_path = debug_dir.join(format!("{}_ERROR_TOO_SMALL.txt", chunk_name));
+                    let error_info = format!("Слишком маленький размер MP3: {} байт\nТекст: {}", audio_bytes.len(), text);
+                    std::fs::write(error_path, error_info)
+                        .map_err(|e| TtsError::IoError(e))?;
+                    continue;
                 }
-            };
-            
-            // Проверяем результат корректировки длительности
-            if adjusted.is_empty() {
-                warn!("Пустой результат корректировки длительности для чанка №{}. Пропускаем фрагмент.", i);
-                let error_path = debug_dir.join(format!("{}_ERROR_EMPTY_ADJUSTED.txt", chunk_name));
-                std::fs::write(error_path, "Пустой результат корректировки длительности")
-                    .map_err(|e| TtsError::IoError(e))?;
-                continue;
+                
+                // Продолжаем обычную обработку
+                let decode_result = audio::decode_mp3(&audio_bytes);
+                let (pcm, sample_rate) = match decode_result {
+                    Ok(result) => result,
+                    Err(e) => {
+                        error!("Ошибка декодирования MP3-чанка №{}: {}. Текст: {}", i, e, text);
+                        continue;
+                    }
+                };
+                
+                let actual_duration = audio::duration_in_seconds(pcm.len(), sample_rate);
+                let target_duration = cue.end - cue.start;
+                
+                // Обновляем состояние синхронизации
+                sync_state.update(target_duration, actual_duration);
+                
+                // Проверяем необходимость контрольной точки
+                if current_time >= next_checkpoint {
+                    info!("Контрольная точка синхронизации на {:.2}s: ошибка={:.3}s", 
+                          current_time, sync_state.cumulative_error);
+                    sync_state.checkpoint();
+                    next_checkpoint = current_time + checkpoint_interval;
+                }
+                
+                // Получаем фактор коррекции для текущего сегмента
+                let correction_factor = sync_state.get_correction_factor();
+                
+                // Применяем коррекцию к целевой длительности
+                let adjusted_target = if correction_factor != 1.0 {
+                    info!("Применяем коррекцию синхронизации для чанка №{}: фактор={:.3}", i, correction_factor);
+                    target_duration * correction_factor
+                } else {
+                    target_duration
+                };
+                
+                send_progress(
+                    &config.progress_sender,
+                    ProgressUpdate::ProcessingFragment {
+                        index: i + 1,
+                        total: cues.len(),
+                        step: format!(
+                            "Длительность: target={:.3}s (adjusted={:.3}s), actual={:.3}s, sync_error={:.3}s",
+                            target_duration, adjusted_target, actual_duration, sync_state.cumulative_error
+                        ),
+                    },
+                ).await;
+                
+                // Корректируем длительность с учетом синхронизации и смежных сегментов
+                let adjusted = if i > 0 && (cue.start - cues[i-1].end).abs() < 0.001 {
+                    // Для смежных сегментов применяем плавный кроссфейд
+                    let crossfade_duration = 0.010; // 10мс
+                    let crossfade_samples = (crossfade_duration * sample_rate as f32) as usize;
+                    
+                    let mut adjusted = audio::adjust_duration(&pcm, actual_duration, adjusted_target, sample_rate, &config.audio_config)?;
+                    
+                    // Применяем фейд к началу текущего сегмента
+                    for i in 0..crossfade_samples.min(adjusted.len()) {
+                        let factor = i as f32 / crossfade_samples as f32;
+                        adjusted[i] *= factor;
+                    }
+                    
+                    // Если есть предыдущий фрагмент, применяем к нему фейд
+                    if let Some(last) = audio_fragments.last_mut() {
+                        let last_samples = &mut last.0;
+                        let fade_start = last_samples.len().saturating_sub(crossfade_samples);
+                        for i in fade_start..last_samples.len() {
+                            let factor = (last_samples.len() - i) as f32 / crossfade_samples as f32;
+                            last_samples[i] *= factor;
+                        }
+                    }
+                    
+                    adjusted
+                } else {
+                    audio::adjust_duration(&pcm, actual_duration, adjusted_target, sample_rate, &config.audio_config)?
+                };
+                
+                // Сохраняем WAV после коррекции длительности для отладки
+                let adjusted_wav_path = debug_dir.join(format!("{}_adjusted.wav", chunk_name));
+                if let Err(e) = audio::encode_wav(&adjusted, sample_rate, adjusted_wav_path.to_str().unwrap()) {
+                    warn!("Не удалось сохранить скорректированный WAV для чанка №{}: {}", i, e);
+                }
+                
+                // Обновляем текущее время
+                current_time = cue.end;
+                
+                // Добавляем обработанный фрагмент
+                audio_fragments.push((adjusted, sample_rate, text.to_string()));
             }
-            
-            // Сохраняем WAV после коррекции длительности для отладки
-            let adjusted_wav_path = debug_dir.join(format!("{}_adjusted.wav", chunk_name));
-            if let Err(e) = audio::encode_wav(&adjusted, sample_rate, adjusted_wav_path.to_str().unwrap()) {
-                warn!("Не удалось сохранить скорректированный WAV для чанка №{}: {}", i, e);
-            }
-            
-            // Используем adjusted напрямую, без применения fade
-            let final_audio = adjusted;
-            
-            // Проверяем результат
-            if final_audio.is_empty() {
-                warn!("Пустой результат для чанка №{}. Пропускаем фрагмент.", i);
-                let error_path = debug_dir.join(format!("{}_ERROR_EMPTY_FINAL.txt", chunk_name));
-                std::fs::write(error_path, "Пустой результат")
-                    .map_err(|e| TtsError::IoError(e))?;
-                continue;
-            }
-            
-            // Сохраняем WAV для отладки
-            let final_wav_path = debug_dir.join(format!("{}_final.wav", chunk_name));
-            if let Err(e) = audio::encode_wav(&final_audio, sample_rate, final_wav_path.to_str().unwrap()) {
-                warn!("Не удалось сохранить финальный WAV для чанка №{}: {}", i, e);
-            }
-            
-            // Добавляем фрагмент в итоговый набор
-            info!("Успешно обработан чанк №{}: итоговая длина {} сэмплов", i, final_audio.len());
-            audio_fragments.push((final_audio, sample_rate, text));
+        }
+
+        // Финальная проверка синхронизации
+        if sync_state.needs_correction() {
+            warn!(
+                "Финальная ошибка синхронизации: {:.3}s (ожидалось={:.3}s, фактически={:.3}s)",
+                sync_state.cumulative_error, sync_state.expected_duration, sync_state.actual_duration
+            );
+        } else {
+            info!(
+                "Синхронизация в пределах допуска: ошибка={:.3}s, длительность={:.3}s",
+                sync_state.cumulative_error, sync_state.expected_duration
+            );
         }
 
         // 4. Склейка аудиофрагментов

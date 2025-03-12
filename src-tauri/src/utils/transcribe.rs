@@ -125,113 +125,417 @@ impl MultipartFormBuilder {
 
 // Функция для преобразования verbose_json с word-level timestamps в VTT формат
 async fn convert_verbose_json_to_vtt(json_content: &str) -> Result<String> {
-    // Парсим JSON
     let json: Value = serde_json::from_str(json_content)?;
     
-    // Проверяем, что это действительно JSON с word-level timestamps
     if !json.is_object() || !json.as_object().unwrap().contains_key("words") {
         return Err(anyhow!("Invalid JSON format: expected an object with 'words' field"));
     }
     
-    // Начинаем формировать VTT
-    let mut vtt_content = String::from("WEBVTT\n\n");
+    // Получаем общую длительность аудио
+    let total_duration = json["duration"].as_f64()
+        .ok_or_else(|| anyhow!("Missing total duration in JSON"))?;
     
-    // Получаем все слова
-    let words = json["words"].as_array().ok_or_else(|| anyhow!("Expected 'words' to be an array"))?;
+    let mut vtt_content = String::from("WEBVTT\n\n");
+    let words = json["words"].as_array()
+        .ok_or_else(|| anyhow!("Expected 'words' to be an array"))?;
     
     if words.is_empty() {
-        return Ok(vtt_content); // Пустой результат, но валидный VTT
+        return Ok(vtt_content);
     }
-    
-    // Настройки для подстройки синхронизации
-    let min_pause_for_new_segment = 0.8; // Секунд паузы для нового сегмента (было 1.0)
-    let long_pause_threshold = 2.0; // Порог для определения длительной паузы (смена сцены)
-    let start_offset_normal = 0.2; // Обычная задержка перед показом субтитров
-    let start_offset_after_long_pause = 0.0; // Нет задержки после длительной паузы
-    let min_segment_duration = 1.0; // Минимальная длительность сегмента в секундах
-    
-    // Группируем слова в предложения/сегменты
-    let mut segments = Vec::new();
-    let mut current_segment = Vec::new();
-    let mut last_end_time = 0.0;
-    let mut is_after_long_pause = Vec::new(); // Отмечаем, следует ли сегмент после длинной паузы
-    
-    for word in words {
-        let start = word["start"].as_f64().ok_or_else(|| anyhow!("Word missing 'start' timestamp"))?;
-        let end = word["end"].as_f64().ok_or_else(|| anyhow!("Word missing 'end' timestamp"))?;
-        let text = word["word"].as_str().ok_or_else(|| anyhow!("Word missing 'word' text"))?;
+
+    #[derive(Debug)]
+    struct TimingConfig {
+        min_pause: f64,          // Минимальная пауза для нового сегмента
+        long_pause: f64,         // Длинная пауза (новая сцена/контекст)
+        max_segment_words: usize,// Максимальное количество слов в сегменте
+        min_segment_words: usize,// Минимальное количество слов в сегменте
+        min_duration: f64,       // Минимальная длительность показа
+        max_duration: f64,       // Максимальная длительность показа
+        words_per_minute: f64,   // Средняя скорость чтения
+        overlap_threshold: f64,  // Максимальное перекрытие между сегментами
+        reading_buffer: f64,     // Буфер для комфортного чтения (множитель)
+        min_word_duration: f64,  // Минимальная длительность на одно слово
+    }
+
+    let config = TimingConfig {
+        min_pause: 0.7,         // Увеличили для лучшего разделения фраз
+        long_pause: 1.5,        // Вернули исходное значение
+        max_segment_words: 14,  // Вернули исходное значение
+        min_segment_words: 4,   // Увеличили минимальное количество слов в сегменте
+        min_duration: 1.5,      // Увеличили минимальную длительность
+        max_duration: 7.0,      // Вернули исходное значение
+        words_per_minute: 150.0, // Уменьшили для более комфортной скорости чтения
+        overlap_threshold: 0.3,  // Вернули исходное значение
+        reading_buffer: 1.25,    // Увеличили буфер для более комфортного чтения
+        min_word_duration: 0.25, // Увеличили минимальную длительность слова
+    };
+
+    #[derive(Debug)]
+    struct Segment {
+        start_time: f64,
+        end_time: f64,
+        words: Vec<String>,
+        is_sentence_end: bool,
+        natural_end: f64,  // Фактическое время окончания последнего слова
+        min_gap: f64,      // Минимальный интервал до следующего сегмента
+    }
+
+    impl Segment {
+        fn new(start: f64, end: f64, words: Vec<String>, is_end: bool, natural_end: f64) -> Self {
+            Self {
+                start_time: start,
+                end_time: end,
+                words,
+                is_sentence_end: is_end,
+                natural_end,
+                min_gap: 0.05, // Минимальный интервал 50мс
+            }
+        }
+    }
+
+    fn is_sentence_end(text: &str) -> bool {
+        let trimmed = text.trim_end();
+        trimmed.ends_with('.') || 
+        trimmed.ends_with('?') || 
+        trimmed.ends_with('!') ||
+        trimmed.ends_with("...") ||
+        trimmed.ends_with('。') || // Japanese period
+        trimmed.ends_with('？') || // Japanese question mark
+        trimmed.ends_with('！')    // Japanese exclamation mark
+    }
+
+    // Добавляем функцию для определения естественных пауз в речи
+    fn is_natural_pause(current_text: &str, next_text: Option<&str>) -> bool {
+        let current = current_text.trim_end();
         
-        let pause_duration = if current_segment.is_empty() && last_end_time > 0.0 {
-            // Вычисляем паузу только между сегментами
-            start - last_end_time
-        } else {
-            0.0 // Внутри сегмента не считаем паузы
-        };
+        // Расширенный список знаков препинания для пауз
+        let pause_markers = [
+            ',', ';', ':', '-', '–', '—',  // Тире разной длины
+            '(', ')', '[', ']', '{', '}',  // Скобки
+            '"', '"', '"', '«', '»'        // Кавычки разных типов
+        ];
         
-        // Определяем, есть ли здесь новый сегмент
-        if current_segment.is_empty() || start - last_end_time > min_pause_for_new_segment {
-            if !current_segment.is_empty() {
-                segments.push(current_segment);
-                is_after_long_pause.push(pause_duration >= long_pause_threshold);
-                current_segment = Vec::new();
+        // Проверяем знаки препинания
+        if pause_markers.iter().any(|&mark| current.ends_with(mark)) {
+            return true;
+        }
+        
+        // Проверяем начало нового предложения
+        if let Some(next) = next_text {
+            let next_trimmed = next.trim_start();
+            if next_trimmed.chars().next().map_or(false, |c| c.is_uppercase()) {
+                // Для коротких фраз не считаем заглавную букву признаком паузы
+                // чтобы избежать излишней фрагментации
+                let words_count = current.split_whitespace().count();
+                if words_count < 4 {
+                    return false;
+                }
+                
+                if current.ends_with('.') || 
+                   current.ends_with('!') || 
+                   current.ends_with('?') ||
+                   current.ends_with('。') {
+                    return true;
+                }
             }
         }
         
-        current_segment.push((start, end, text));
-        last_end_time = end;
+        false
     }
-    
-    // Добавляем последний сегмент
-    if !current_segment.is_empty() {
-        segments.push(current_segment);
-        is_after_long_pause.push(false); // Последний сегмент не может быть после длинной паузы
+
+    // Добавляем функцию для определения оптимальной длительности чтения
+    fn calculate_reading_time(word_count: usize, text: &str, config: &TimingConfig) -> f64 {
+        let base_reading_time = (word_count as f64 / config.words_per_minute) * 60.0;
+        
+        // Корректируем время чтения в зависимости от длины слов
+        let avg_word_length = text.len() as f64 / word_count as f64;
+        let length_factor = if avg_word_length > 8.0 {
+            1.2 // Длинные слова читаются дольше
+        } else if avg_word_length < 4.0 {
+            0.9 // Короткие слова читаются быстрее
+        } else {
+            1.0
+        };
+
+        base_reading_time * length_factor
     }
-    
-    // Форматируем каждый сегмент в VTT формат
-    for (i, segment) in segments.iter().enumerate() {
-        if segment.is_empty() {
+
+    // Модифицированная функция расчета длительности показа
+    fn calculate_display_duration(
+        word_count: usize,
+        text_duration: f64,
+        next_segment_start: Option<f64>,
+        config: &TimingConfig,
+        total_duration: f64,
+        current_start: f64,
+        text: &str,
+    ) -> f64 {
+        // Базовое время чтения на основе количества слов
+        let reading_time = calculate_reading_time(word_count, text, config);
+        
+        // Используем фактическую длительность произнесения как минимальную базу
+        let base_duration = text_duration.max(reading_time);
+        
+        // Определяем максимально возможную длительность
+        let max_possible = if let Some(next_start) = next_segment_start {
+            // Если есть следующий сегмент, ограничиваем его началом
+            let available = next_start - current_start;
+            if available < text_duration {
+                // Если доступного времени меньше чем длительность текста,
+                // используем фактическую длительность
+                text_duration
+            } else {
+                // Иначе можем использовать доступное время
+                available.min(config.max_duration)
+            }
+        } else {
+            // Для последнего сегмента используем оставшееся время
+            (total_duration - current_start).min(config.max_duration)
+        };
+
+        // Добавляем буфер для комфортного чтения, но не превышаем max_possible
+        let with_buffer = (base_duration * config.reading_buffer)
+            .clamp(config.min_duration, max_possible);
+        
+        // Округляем до 3 знаков после запятой для избежания проблем с плавающей точкой
+        (with_buffer * 1000.0).round() / 1000.0
+    }
+
+    let mut segments = Vec::new();
+    let mut current_segment = Vec::new();
+    let mut word_count = 0;
+    let mut total_segments = 0;
+
+    info!("Starting VTT conversion with {} words", words.len());
+
+    for (i, word) in words.iter().enumerate() {
+        let start = word["start"].as_f64()
+            .ok_or_else(|| anyhow!("Word missing 'start' timestamp"))?;
+        let end = word["end"].as_f64()
+            .ok_or_else(|| anyhow!("Word missing 'end' timestamp"))?;
+        let text = word["word"].as_str()
+            .ok_or_else(|| anyhow!("Word missing 'word' text"))?;
+
+        // Пропускаем пустые сегменты или сегменты только с пробелами
+        if text.trim().is_empty() {
             continue;
         }
 
-        // Определяем смещение времени в зависимости от того, следует ли сегмент после длинной паузы
-        let follows_long_pause = is_after_long_pause.get(i).copied().unwrap_or(false);
-        let offset = if follows_long_pause {
-            // Для сегментов после длинной паузы (смена сцены/диалога) не добавляем задержку
-            info!("Segment {} follows a long pause, using exact timing", i);
-            start_offset_after_long_pause
+        let next_word = if i < words.len() - 1 {
+            words[i + 1]["word"].as_str()
         } else {
-            // Для обычных сегментов добавляем стандартную задержку
-            start_offset_normal
+            None
         };
-        
-        // Применяем смещение к времени начала для лучшей синхронизации
-        let start_time = segment.first().unwrap().0 + offset;
-        let end_time = segment.last().unwrap().1;
-        
-        // Убеждаемся, что сегмент не слишком короткий
-        let duration = end_time - start_time;
-        let adjusted_end_time = if duration < min_segment_duration {
-            start_time + min_segment_duration
+
+        let pause_after = if i < words.len() - 1 {
+            words[i + 1]["start"].as_f64().unwrap_or(end) - end
         } else {
-            end_time
+            config.long_pause
         };
-        
-        // Форматируем времена в формат VTT (HH:MM:SS.mmm)
-        let start_formatted = format_timestamp(start_time);
-        let end_formatted = format_timestamp(adjusted_end_time);
-        
-        // Объединяем все слова в сегменте
-        let text: String = segment.iter()
-            .map(|(_, _, word)| word.to_string())
-            .collect::<Vec<String>>()
-            .join(" ")
-            .trim()
-            .to_string();
-        
-        // Добавляем сегмент в VTT без порядкового номера
-        vtt_content.push_str(&format!("{} --> {}\n{}\n\n", start_formatted, end_formatted, text));
+
+        current_segment.push((start, end, text.to_string()));
+        word_count += 1;
+
+        let should_split = 
+            pause_after >= config.min_pause || 
+            word_count >= config.max_segment_words || 
+            is_sentence_end(text) || 
+            is_natural_pause(text, next_word) ||
+            i == words.len() - 1;
+
+        // Добавляем сегмент только если в нем есть слова
+        if should_split && !current_segment.is_empty() {
+            let segment_start = current_segment.first().unwrap().0;
+            let segment_end = current_segment.last().unwrap().1;
+            let text: Vec<String> = current_segment.iter()
+                .map(|(_,_,word)| word.clone())
+                .collect();
+
+            // Проверяем, что в сегменте есть непустой текст
+            let joined_text = text.join(" ");
+            let segment_text = joined_text.trim();
+            if !segment_text.is_empty() {
+                let next_segment_start = if i < words.len() - 1 {
+                    words[i + 1]["start"].as_f64()
+                } else {
+                    None
+                };
+
+                let text_duration = segment_end - segment_start;
+                let display_duration = calculate_display_duration(
+                    word_count,
+                    text_duration,
+                    next_segment_start,
+                    &config,
+                    total_duration,
+                    segment_start,
+                    segment_text,
+                );
+
+                debug!(
+                    "Segment {}: words={}, duration={:.2}s, display={:.2}s, text='{}'",
+                    total_segments + 1,
+                    word_count,
+                    text_duration,
+                    display_duration,
+                    segment_text
+                );
+
+                segments.push(Segment::new(
+                    segment_start,
+                    segment_start + display_duration,
+                    text,
+                    is_sentence_end(current_segment.last().unwrap().2.as_str()),
+                    segment_end
+                ));
+
+                total_segments += 1;
+            } else {
+                // Для пустых сегментов сохраняем их как периоды тишины
+                debug!(
+                    "Empty segment detected: start={:.2}s, end={:.2}s",
+                    segment_start,
+                    segment_end
+                );
+                segments.push(Segment::new(
+                    segment_start,
+                    segment_end,
+                    vec![],
+                    false,
+                    segment_end
+                ));
+            }
+
+            current_segment.clear();
+            word_count = 0;
+        }
     }
+
+    // Обработка случая, когда остались слова, но их меньше min_segment_words
+    if !current_segment.is_empty() {
+        let segment_start = current_segment.first().unwrap().0;
+        let segment_end = current_segment.last().unwrap().1;
+        let text: Vec<String> = current_segment.iter()
+            .map(|(_,_,word)| word.clone())
+            .collect();
+
+        let joined_text = text.join(" ");
+        let segment_text = joined_text.trim();
+        if !segment_text.is_empty() {
+            let display_duration = calculate_display_duration(
+                word_count,
+                segment_end - segment_start,
+                None,
+                &config,
+                total_duration,
+                segment_start,
+                segment_text,
+            );
+
+            debug!(
+                "Final segment {}: words={}, duration={:.2}s, text='{}'",
+                total_segments + 1,
+                word_count,
+                display_duration,
+                segment_text
+            );
+
+            segments.push(Segment::new(
+                segment_start,
+                segment_start + display_duration,
+                text,
+                true,
+                segment_end
+            ));
+        }
+    }
+
+    info!("Created {} segments from {} words", segments.len(), words.len());
+
+    // Пост-обработка сегментов для обеспечения корректной синхронизации
+    let mut total_error = 0.0;
+    let mut last_end = 0.0;
     
+    for i in 0..segments.len() {
+        if i > 0 {
+            let prev_end = segments[i-1].end_time;
+            let curr_start = segments[i].start_time;
+            let min_gap = segments[i-1].min_gap;
+            
+            // Вычисляем накопленную ошибку
+            total_error = prev_end - last_end;
+            
+            // Корректируем текущий сегмент с учетом накопленной ошибки
+            if total_error.abs() > 0.1 { // Если ошибка больше 100мс
+                let correction = if total_error > 0.0 {
+                    // Если отстаем - пытаемся нагнать
+                    (-total_error).max(-0.2) // Максимум 200мс за раз
+                } else {
+                    // Если спешим - замедляемся
+                    (-total_error).min(0.2)  // Максимум 200мс за раз
+                };
+                
+                segments[i].start_time = (curr_start + correction).max(prev_end + min_gap);
+                debug!(
+                    "Applying sync correction to segment {}: {}s (total error: {}s)",
+                    i + 1, correction, total_error
+                );
+            }
+            
+            // Проверяем и корректируем интервалы между сегментами
+            if segments[i].start_time < prev_end + min_gap {
+                segments[i].start_time = prev_end + min_gap;
+                debug!(
+                    "Adjusted start time of segment {} to maintain minimum gap",
+                    i + 1
+                );
+            }
+        }
+        
+        // Сохраняем конец текущего сегмента для следующей итерации
+        last_end = segments[i].end_time;
+
+        // Проверяем, не выходит ли сегмент за пределы общей длительности
+        if segments[i].end_time > total_duration {
+            debug!(
+                "Segment {} exceeds total duration, adjusting end time from {:.3}s to {:.3}s",
+                i+1, segments[i].end_time, total_duration
+            );
+            segments[i].end_time = total_duration;
+        }
+    }
+
+    // Проверяем финальную синхронизацию
+    let final_duration = segments.last().map_or(0.0, |s| s.end_time);
+    if (final_duration - total_duration).abs() > 0.1 {
+        warn!(
+            "Final duration mismatch: expected={:.3}s, actual={:.3}s, difference={:.3}s",
+            total_duration, final_duration, final_duration - total_duration
+        );
+    } else {
+        info!(
+            "Final synchronization successful: duration={:.3}s, error={:.3}s",
+            final_duration, final_duration - total_duration
+        );
+    }
+
+    // Форматируем сегменты в VTT
+    for segment in segments.iter() {
+        let start_formatted = format_timestamp(segment.start_time);
+        let end_formatted = format_timestamp(segment.end_time);
+        
+        // Для пустых сегментов (периодов тишины) добавляем только временные метки
+        if segment.words.is_empty() {
+            vtt_content.push_str(&format!("{} --> {}\n\n", 
+                start_formatted, end_formatted));
+        } else {
+            let text = segment.words.join(" ");
+            vtt_content.push_str(&format!("{} --> {}\n{}\n\n", 
+                start_formatted, end_formatted, text));
+        }
+    }
+
+    info!("VTT conversion completed successfully");
     Ok(vtt_content)
 }
 
