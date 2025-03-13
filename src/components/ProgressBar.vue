@@ -21,7 +21,6 @@
         :style="{ width: `${progress}%` }"
         :class="{ 'complete': progress >= 100 }"
       ></div>
-      <span class="progress-text">{{ progress }}%</span>
     </div>
 
     <!-- Additional info like segments if provided -->
@@ -118,14 +117,6 @@ const showSegments = computed(() =>
 
 .progress-bar.complete {
   background-color: var(--success-color, #4cd964);
-}
-
-.progress-text {
-  position: absolute;
-  right: -25px;
-  top: -2px;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
 }
 
 .segments-info {

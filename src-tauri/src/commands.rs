@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use serde_json::json;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
+use tauri_plugin_opener::OpenerExt;
 use crate::utils::tts::tts::{synchronizer::{SyncConfig, process_sync}, ProgressUpdate, TtsConfig, AudioProcessingConfig};
 use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
 use crate::utils::merge::{self, MergeProgress};
@@ -217,7 +218,7 @@ pub async fn validate_openai_key(api_key: String) -> Result<bool, String> {
 pub async fn translate_vtt(
     vtt_path: String,
     output_path: String,
-    _source_language: String,
+    source_language: String,
     target_language: String,
     target_language_code: String,
     api_key: String,
@@ -733,6 +734,8 @@ pub async fn process_video(
     output_path: String,
     target_language: String,
     target_language_name: String,
+    source_language_code: String,
+    source_language_name: String,
     api_key: String,
     window: tauri::Window,
 ) -> Result<ProcessVideoResult, String> {
@@ -740,6 +743,7 @@ pub async fn process_video(
     info!("Parameters:");
     info!("  URL: {}", url);
     info!("  Output Path: {}", output_path);
+    info!("  Source Language: {} ({})", source_language_name, source_language_code);
     info!(
         "  Target Language: {} ({})",
         target_language_name, target_language
@@ -792,7 +796,7 @@ pub async fn process_video(
     let translation_result = match translate_vtt(
         transcription_result.vtt_path.clone(),
         output_path.clone(),
-        "auto".to_string(),           // source language - auto detect
+        source_language_code.clone(),  // Use actual source language from parameters
         target_language_name.clone(), // target language name
         target_language.clone(),      // target language code
         api_key.clone(),
@@ -862,26 +866,17 @@ pub async fn process_video(
         format!("TTS generation and synchronization failed: {}", e)
     })?;
 
-    // Create a merged directory
-    let merged_dir = PathBuf::from(&output_path).join("merged");
-    tokio::fs::create_dir_all(&merged_dir)
-        .await
-        .map_err(|e| format!("Failed to create merged directory: {}", e))?;
-    
     // We need to determine source language code from transcription
-    let source_language_code = "auto"; // Default, should be obtained from transcription if available
-    let source_language_name = "Original"; // Default
-    
     let merge_result = merge_video(
         download_result.0.clone(), // video_path
         tts_result.audio_path.clone(), // Use the TTS result as the translated audio
         download_result.1.clone(), // audio_path
         transcription_result.vtt_path.clone(),
         translation_result.translated_vtt_path.clone(),
-        merged_dir.to_string_lossy().to_string(),
-        source_language_code.to_string(),
+        output_path.clone(), // Use the user-selected output directory directly
+        source_language_code,
         target_language.clone(),
-        source_language_name.to_string(),
+        source_language_name,
         target_language_name.clone(),
         window.clone(),
     )
@@ -899,6 +894,16 @@ pub async fn process_video(
     // Emit merge-complete event before returning
     window.emit("merge-complete", &merge_result)
         .map_err(|e| format!("Failed to emit merge-complete event: {}", e))?;
+
+    // Clean up temporary files
+    info!("Starting cleanup of temporary files");
+    if let Err(e) = cleanup_temp_files(
+        merge_result.merged_video_path.clone(),
+        output_path.clone()
+    ).await {
+        warn!("Failed to cleanup temporary files: {}", e);
+        // Don't return error here, as the main process was successful
+    }
 
     Ok(ProcessVideoResult {
         video_path: download_result.0, // video_path
@@ -945,6 +950,23 @@ pub async fn merge_video(
             }));
         }
     });
+
+    // Get original video filename without extension
+    let video_filename = Path::new(&video_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("video");
+
+    // Create final output path with language code suffix in user's selected directory
+    let final_output_path = PathBuf::from(&output_dir)
+        .join(format!("{}_{}.mp4", video_filename, target_language_code));
+
+    // Create output directory if it doesn't exist
+    tokio::fs::create_dir_all(&output_dir)
+        .await
+        .map_err(|e| format!("Failed to create output directory: {}", e))?;
+    
+    info!("Final output will be: {}", final_output_path.display());
     
     // Convert paths to Path objects
     let video_path = Path::new(&video_path);
@@ -952,16 +974,15 @@ pub async fn merge_video(
     let original_audio_path = Path::new(&original_audio_path); 
     let original_vtt_path = Path::new(&original_vtt_path);
     let translated_vtt_path = Path::new(&translated_vtt_path);
-    let output_dir_path = Path::new(&output_dir);
     
-    // Call the merge_files function
+    // Call the merge_files function with the final output path
     let result = merge::merge_files(
         video_path,
         translated_audio_path,
         original_audio_path,
         original_vtt_path,
         translated_vtt_path,
-        output_dir_path,
+        &final_output_path,
         &source_language_code,
         &target_language_code,
         &source_language_name,
@@ -979,7 +1000,7 @@ pub async fn merge_video(
     
     Ok(MergeResult {
         merged_video_path: result.to_string_lossy().to_string(),
-        output_dir: output_dir,
+        output_dir,
     })
 }
 
@@ -1025,6 +1046,14 @@ async fn process_steps(
 
 #[tauri::command]
 pub async fn cleanup_temp_files(final_video_path: String, output_dir: String) -> Result<(), String> {
+    info!("Starting cleanup with final_video_path: {} and output_dir: {}", final_video_path, output_dir);
+
+    // Убедимся что output_dir существует и является директорией
+    let cleanup_dir = std::path::Path::new(&output_dir);
+    if !cleanup_dir.exists() || !cleanup_dir.is_dir() {
+        return Err(format!("Output directory does not exist or is not a directory: {}", output_dir));
+    }
+
     // Get the filename from the final video path
     let final_video_name = std::path::Path::new(&final_video_path)
         .file_name()
@@ -1032,22 +1061,358 @@ pub async fn cleanup_temp_files(final_video_path: String, output_dir: String) ->
         .to_str()
         .ok_or("Invalid video filename")?;
 
-    // Construct the destination path
-    let destination_path = std::path::Path::new(&output_dir).join(final_video_name);
+    // Construct the destination path in the output directory
+    let destination_path = cleanup_dir.join(final_video_name);
 
-    // Move the final video to the output directory
-    std::fs::rename(&final_video_path, &destination_path)
-        .map_err(|e| format!("Failed to move video file: {}", e))?;
+    // Get the base filename (without extension and language suffix) from the final video
+    let base_filename = std::path::Path::new(&final_video_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| {
+            // Remove language suffix if present (e.g., "_ru" from "video_ru.mp4")
+            if let Some(pos) = s.rfind('_') {
+                &s[..pos]
+            } else {
+                s
+            }
+        })
+        .unwrap_or("");
 
-    // Get the parent directory of the final video (merged directory)
-    let temp_dir = std::path::Path::new(&final_video_path)
-        .parent() // merged directory
-        .and_then(|p| p.parent()) // video directory
-        .ok_or("Failed to get temp directory")?;
+    info!("Base filename for cleanup: {}", base_filename);
+    info!("Cleaning up in directory: {}", cleanup_dir.display());
 
-    // Remove the entire temp directory
-    std::fs::remove_dir_all(temp_dir)
-        .map_err(|e| format!("Failed to remove temp directory: {}", e))?;
+    // Define and remove known temporary directories
+    let temp_directories = ["tts"];
+    for dir_name in temp_directories.iter() {
+        let dir_path = cleanup_dir.join(dir_name);
+        if dir_path.exists() && dir_path.is_dir() {
+            info!("Removing directory: {}", dir_path.display());
+            if let Err(e) = tokio::fs::remove_dir_all(&dir_path).await {
+                warn!("Failed to remove temporary directory {}: {}", dir_path.display(), e);
+            } else {
+                info!("Successfully removed temporary directory: {}", dir_path.display());
+            }
+        }
+    }
+
+    // Remove temporary files in the output directory
+    let mut entries = tokio::fs::read_dir(cleanup_dir).await
+        .map_err(|e| format!("Failed to read output directory: {}", e))?;
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.is_file() {
+            let file_name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+
+            // Check if the file starts with base_filename and has one of our temp extensions
+            let is_temp_file = file_name.starts_with(base_filename) && (
+                file_name.ends_with("_audio.m4a") ||
+                file_name.ends_with("_video.mp4") ||
+                file_name.ends_with(".vtt") ||
+                file_name.ends_with(".ass") ||
+                file_name.ends_with("_tts.wav")
+            );
+
+            if is_temp_file {
+                info!("Removing temporary file: {}", path.display());
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    warn!("Failed to remove temporary file {}: {}", path.display(), e);
+                } else {
+                    info!("Successfully removed temporary file: {}", path.display());
+                }
+            } else {
+                info!("Skipping non-temporary file: {}", file_name);
+            }
+        }
+    }
+
+    // Ensure the final video is in the correct location
+    if final_video_path != destination_path.to_string_lossy() {
+        info!("Moving final video from {} to {}", final_video_path, destination_path.display());
+        if let Err(e) = tokio::fs::rename(&final_video_path, &destination_path).await {
+            // If rename fails (possibly due to cross-device link), try copy and delete
+            if let Err(copy_err) = tokio::fs::copy(&final_video_path, &destination_path).await {
+                error!("Failed to copy video file: {}", copy_err);
+                return Err(format!("Failed to move video file: {}", e));
+            }
+            if let Err(del_err) = tokio::fs::remove_file(&final_video_path).await {
+                warn!("Failed to remove source video file after copying: {}", del_err);
+            }
+        }
+        info!("Successfully moved final video to: {}", destination_path.display());
+    } else {
+        info!("Final video is already in the correct location");
+    }
 
     Ok(())
+}
+
+/// Проверяет доступность YouTube из текущего местоположения
+/// 
+/// Эта функция выполняет HTTP-запрос к API YouTube и анализирует ответ.
+/// Возвращает true, если YouTube доступен, и false, если он заблокирован.
+#[tauri::command]
+pub async fn check_youtube_availability() -> Result<bool, String> {
+    info!("Checking YouTube availability...");
+    
+    // Создаем HTTP-клиент с увеличенным таймаутом и параметрами для определения проблем
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    
+    // Адреса для проверки доступности YouTube
+    let endpoints = [
+        "https://www.youtube.com/",
+        "https://www.googleapis.com/youtube/v3/search?part=id&maxResults=1",
+        "https://www.youtube.com/iframe_api"
+    ];
+    
+    for endpoint in endpoints {
+        info!("Checking YouTube endpoint: {}", endpoint);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.get(endpoint).send()
+        ).await {
+            Ok(Ok(response)) => {
+                let status = response.status();
+                info!("YouTube response status: {}", status);
+                
+                // Даже если мы получаем 403, это может означать, что сервис доступен, 
+                // но требует авторизации (особенно для API endpoints)
+                if status.is_success() || status.as_u16() == 403 {
+                    info!("YouTube is accessible");
+                    return Ok(true);
+                }
+                
+                // Получаем детали ответа для анализа
+                match response.text().await {
+                    Ok(text) => {
+                        // Проверяем на наличие признаков блокировки
+                        if text.contains("unavailable in your country") || 
+                           text.contains("доступ ограничен") ||
+                           text.contains("access denied") {
+                            info!("YouTube appears to be blocked: {}", text);
+                            return Ok(false);
+                        }
+                        
+                        // Если нет явных признаков блокировки, продолжаем проверку других эндпоинтов
+                    },
+                    Err(e) => warn!("Failed to read YouTube response body: {}", e)
+                }
+            },
+            Ok(Err(e)) => {
+                warn!("YouTube request failed: {}", e);
+                
+                // Анализируем тип ошибки
+                if e.is_connect() || e.is_timeout() {
+                    // Проблемы с соединением часто указывают на блокировку
+                    warn!("Connection problems suggest YouTube might be blocked");
+                }
+            },
+            Err(_) => {
+                warn!("YouTube request timed out");
+                // Тайм-аут может указывать на блокировку
+            }
+        }
+    }
+    
+    // Если все проверки не удались, вероятно YouTube заблокирован
+    info!("All YouTube checks failed, service appears to be blocked");
+    Ok(false)
+}
+
+/// Проверяет доступность OpenAI из текущего местоположения
+/// 
+/// Эта функция выполняет HTTP-запрос к публичным эндпоинтам OpenAI и анализирует ответ.
+/// Не требует ключа API, просто проверяет доступность сервиса.
+/// Возвращает true, если OpenAI доступен, и false, если он заблокирован.
+#[tauri::command]
+pub async fn check_openai_availability() -> Result<bool, String> {
+    info!("Checking OpenAI availability...");
+    
+    // Создаем HTTP-клиент с увеличенным таймаутом
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    
+    // Проверяемые эндпоинты OpenAI (публичные, не требующие API ключа)
+    let endpoints = [
+        "https://openai.com/", 
+        "https://api.openai.com/v1/models",
+        "https://status.openai.com/"
+    ];
+    
+    for endpoint in endpoints {
+        info!("Checking OpenAI endpoint: {}", endpoint);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.get(endpoint).send()
+        ).await {
+            Ok(Ok(response)) => {
+                let status = response.status();
+                info!("OpenAI response status: {}", status);
+                
+                // Для моделей API нам достаточно получить 401 Unauthorized, это означает что API доступен
+                if status.is_success() || (endpoint.contains("api.openai.com") && status.as_u16() == 401) {
+                    info!("OpenAI is accessible");
+                    return Ok(true);
+                }
+                
+                // Получаем детали ответа для анализа
+                match response.text().await {
+                    Ok(text) => {
+                        // Проверяем на наличие признаков блокировки региона
+                        if text.contains("not available in your country") || 
+                           text.contains("регион не поддерживается") ||
+                           text.contains("service is not available") {
+                            info!("OpenAI appears to be blocked for your region: {}", text);
+                            return Ok(false);
+                        }
+                    },
+                    Err(e) => warn!("Failed to read OpenAI response body: {}", e)
+                }
+            },
+            Ok(Err(e)) => {
+                warn!("OpenAI request failed: {}", e);
+                
+                // Анализируем тип ошибки
+                if e.is_connect() || e.is_timeout() {
+                    // Проблемы с соединением часто указывают на блокировку
+                    warn!("Connection problems suggest OpenAI might be blocked");
+                }
+            },
+            Err(_) => {
+                warn!("OpenAI request timed out");
+                // Тайм-аут может указывать на блокировку
+            }
+        }
+    }
+    
+    // Если все проверки не удались, вероятно OpenAI недоступен
+    info!("All OpenAI checks failed, service appears to be blocked");
+    Ok(false)
+}
+
+/// Структура для передачи результатов проверки доступности сервисов
+#[derive(Serialize)]
+pub struct ServiceAvailabilityResult {
+    pub youtube_available: bool,
+    pub openai_available: bool,
+    pub vpn_required: bool,
+    pub youtube_blocked: bool,
+    pub openai_blocked: bool,
+    pub message: String,
+    pub is_retry: bool,
+}
+
+/// Проверяет доступность всех нужных сервисов и возвращает результат
+/// с рекомендациями для пользователя о необходимости VPN
+#[tauri::command]
+pub async fn check_services_availability(window: tauri::WebviewWindow, is_retry: Option<bool>) -> Result<ServiceAvailabilityResult, String> {
+    // Определяем, является ли эта проверка повторной
+    let is_retry = is_retry.unwrap_or(false);
+    
+    // Отправляем событие о начале проверки
+    let _ = window.emit("services-check-started", json!({
+        "is_retry": is_retry
+    }));
+    
+    info!("Checking availability of required services... (retry: {})", is_retry);
+    
+    // Проверяем YouTube
+    let _ = window.emit("checking-youtube", ());
+    let youtube_available = match check_youtube_availability().await {
+        Ok(available) => {
+            info!("YouTube availability check result: {}", available);
+            let _ = window.emit("youtube-check-complete", available);
+            available
+        },
+        Err(e) => {
+            error!("Error checking YouTube availability: {}", e);
+            let _ = window.emit("youtube-check-error", &e);
+            // В случае ошибки проверки предполагаем, что сервис может быть недоступен
+            false
+        }
+    };
+    
+    // Проверяем OpenAI
+    let _ = window.emit("checking-openai", ());
+    let openai_available = match check_openai_availability().await {
+        Ok(available) => {
+            info!("OpenAI availability check result: {}", available);
+            let _ = window.emit("openai-check-complete", available);
+            available
+        },
+        Err(e) => {
+            error!("Error checking OpenAI availability: {}", e);
+            let _ = window.emit("openai-check-error", &e);
+            // В случае ошибки проверки предполагаем, что сервис может быть недоступен
+            false
+        }
+    };
+    
+    // Определяем, нужен ли VPN
+    let vpn_required = !youtube_available || !openai_available;
+    
+    // Формируем сообщение для пользователя в зависимости от результата и типа проверки
+    let message = if vpn_required {
+        let mut blocked_services = Vec::new();
+        if !youtube_available {
+            blocked_services.push("YouTube");
+        }
+        if !openai_available {
+            blocked_services.push("OpenAI");
+        }
+        
+        if is_retry {
+            format!(
+                "Сервисы все еще недоступны: {}. \
+                Пожалуйста, убедитесь, что VPN включен и корректно настроен. \
+                После настройки VPN нажмите 'OK' для повторной проверки.",
+                blocked_services.join(", ")
+            )
+        } else {
+            format!(
+                "Для корректной работы приложения требуется VPN, так как следующие сервисы недоступны: {}. \
+                Пожалуйста, включите VPN и нажмите 'OK' для повторной проверки.",
+                blocked_services.join(", ")
+            )
+        }
+    } else {
+        if is_retry {
+            "Все необходимые сервисы теперь доступны! VPN работает корректно.".to_string()
+        } else {
+            "Все необходимые сервисы доступны. VPN не требуется.".to_string()
+        }
+    };
+    
+    // Отправляем событие о завершении проверки
+    let _ = window.emit("services-check-completed", json!({
+        "vpn_required": vpn_required,
+        "is_retry": is_retry
+    }));
+    
+    Ok(ServiceAvailabilityResult {
+        youtube_available,
+        openai_available,
+        vpn_required,
+        youtube_blocked: !youtube_available,
+        openai_blocked: !openai_available,
+        message,
+        is_retry,
+    })
+}
+
+/// Open a file using the system's default program
+#[tauri::command]
+pub async fn open_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    app.opener()
+        .open_path(&path, None::<&str>)
+        .map_err(|e| e.to_string())
 }

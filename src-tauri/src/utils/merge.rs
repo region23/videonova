@@ -194,9 +194,9 @@ pub async fn merge_files(
     original_audio_path: &Path,
     original_vtt_path: &Path,
     translated_vtt_path: &Path,
-    output_dir: &Path,
-    source_language_code: &str, // Add source language parameter
-    target_language_code: &str, // Add target language parameter
+    output_path: &Path,
+    source_language_code: &str,
+    target_language_code: &str,
     source_language_name: &str,
     target_language_name: &str,
     progress_tx: Option<mpsc::Sender<MergeProgress>>,
@@ -208,17 +208,23 @@ pub async fn merge_files(
     log::info!("  Original Audio: {}", original_audio_path.display());
     log::info!("  Original VTT: {}", original_vtt_path.display());
     log::info!("  Translated VTT: {}", translated_vtt_path.display());
-    log::info!("  Output Dir: {}", output_dir.display());
+    log::info!("  Output Path: {}", output_path.display());
 
-    // Construct output path
+    // Get the output directory from the output path
+    let output_dir = output_path.parent()
+        .ok_or("Invalid output path: no parent directory")?;
+
+    // Create output directory if it doesn't exist
+    tokio::fs::create_dir_all(output_dir)
+        .await
+        .map_err(|e| format!("Failed to create output directory: {}", e))?;
+
+    // Get video filename without extension for temporary files
     let video_stem = video_path
         .file_stem()
         .ok_or("Invalid video filename")?
         .to_str()
         .ok_or("Invalid video filename encoding")?;
-
-    let output_path = output_dir.join(format!("{}_final.mp4", video_stem));
-    log::info!("Output path will be: {}", output_path.display());
 
     // Send initial progress
     if let Some(tx) = &progress_tx {
@@ -407,7 +413,7 @@ pub async fn merge_files(
         .await?;
     }
 
-    Ok(output_path)
+    Ok(output_path.to_path_buf())
 }
 
 /// Convert ISO 639-1 two-letter language code to ISO 639-2 three-letter code

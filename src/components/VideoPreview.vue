@@ -2,9 +2,9 @@
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
-import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import ProgressBar from './ProgressBar.vue'
 import ProgressStepper from './ProgressStepper.vue'
+import ServiceAvailabilityCheck from './ServiceAvailabilityCheck.vue'
 
 interface VideoInfo {
   title: string
@@ -735,10 +735,20 @@ onMounted(async () => {
       currentStep: currentStep.value
     });
     
-    // Force UI update
+    // Force UI update and emit events
     nextTick(() => {
+      // Reset internal state
+      internalIsLoading.value = false;
+      previousUrl.value = null;
+      shouldHideVideoInfo.value = true;
+      initialLoadDone.value = false;
+      
       // Emit completion event
       emit('merge-complete', event.payload.output_dir);
+      // Clear video info to reset the URL input
+      emit('clear-video-info');
+      // Explicitly emit video info ready state change
+      emit('video-info-ready-state-change', false);
     });
   });
 
@@ -1152,10 +1162,10 @@ const getDownloadSubtask = computed(() => {
 async function openFinalVideo() {
   if (finalVideoPath.value) {
     try {
-      console.log('Attempting to reveal video file in directory:', finalVideoPath.value);
-      await revealItemInDir(finalVideoPath.value);
+      console.log('Attempting to open video file:', finalVideoPath.value);
+      await invoke('open_file', { path: finalVideoPath.value });
     } catch (error) {
-      console.error('Failed to reveal video file:', error);
+      console.error('Failed to open video file:', error);
     }
   }
 }
@@ -1256,6 +1266,9 @@ function logStateChange(trigger: string) {
         <div class="loading-text">Loading video info...</div>
       </div>
     </div>
+
+    <!-- Service Availability Check - показываем, когда нет активного процесса перевода -->
+    <ServiceAvailabilityCheck v-if="!currentStep && !translationComplete" class="service-check" />
 
     <!-- Progress Stepper - показываем только когда есть активный шаг или процесс завершен -->
     <ProgressStepper 
@@ -1759,5 +1772,11 @@ function logStateChange(trigger: string) {
 
 .open-file-button .icon {
   font-size: 1rem;
+}
+
+/* Add styles for the ServiceAvailabilityCheck placement */
+.service-check {
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
 }
 </style>

@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { listen, emit } from '@tauri-apps/api/event'  // Add 'emit' here
+import { listen, emit } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 import { Store as TauriStore } from '@tauri-apps/plugin-store'
 import YouTubeInput from './YouTubeInput.vue'
 import LanguageSelector from './LanguageSelector.vue'
 import VideoPreview from './VideoPreview.vue'
 import ApiKeyInput from './ApiKeyInput.vue'
+import ServiceAvailabilityCheck from './ServiceAvailabilityCheck.vue'
 import appLogo from '../assets/app_icon_2.png'
 
 interface Language {
@@ -82,20 +83,54 @@ const translationProgress = ref<any>(null)
 const ttsProgress = ref<any>(null)
 const mergeProgress = ref<any>(null)
 
+// Добавляем состояние для отображения проверки сервисов
+const showServiceCheck = ref(false)
+const serviceCheckCompleted = ref(false)
+const vpnRequired = ref(false)
+
 onMounted(async () => {
-  unlisten = await listen('show-settings', () => {
-    showApiKeyUpdate.value = true
-  })
+  try {
+    unlisten = await listen('show-settings', () => {
+      showApiKeyUpdate.value = true
+    })
 
-  // Add listener for merge-complete event
-  const unlistenMergeComplete = await listen('merge-complete', () => {
-    handleMergeComplete()
-  })
+    // Add listener for merge-complete event
+    const unlistenMergeComplete = await listen('merge-complete', () => {
+      handleMergeComplete()
+    })
+    
+    // Добавляем слушатель для событий проверки сервисов
+    const unlistenServicesCheck = await listen('services-check-completed', (event) => {
+      try {
+        const data = event.payload as { vpn_required: boolean, is_retry: boolean };
+        vpnRequired.value = data.vpn_required;
+        serviceCheckCompleted.value = true;
+        
+        // Если VPN не требуется, скрываем компонент проверки через некоторое время
+        if (!vpnRequired.value) {
+          setTimeout(() => {
+            showServiceCheck.value = false;
+          }, 3000);
+        } else {
+          // Если VPN требуется, оставляем окно открытым
+          showServiceCheck.value = true;
+        }
+      } catch (e) {
+        console.error('Ошибка обработки события services-check-completed:', e);
+      }
+    });
 
-  onUnmounted(() => {
-    unlisten?.()
-    unlistenMergeComplete?.()
-  })
+    onUnmounted(() => {
+      unlisten?.()
+      unlistenMergeComplete?.()
+      unlistenServicesCheck?.()
+    })
+    
+    // Показываем компонент проверки сервисов при загрузке
+    showServiceCheck.value = true;
+  } catch (e) {
+    console.error('Ошибка при настройке слушателей событий:', e);
+  }
 })
 
 const handleVideoInfo = (info: VideoInfo) => {
@@ -323,6 +358,12 @@ const handleVideoInfoReadyStateChange = (isReady: boolean) => {
     isSourceLanguageDetected.value = false
   }
 }
+
+const handleClearVideoInfo = () => {
+  videoInfo.value = null;
+  currentUrl.value = '';
+  isVideoInfoReady.value = false;
+}
 </script>
 
 <template>
@@ -342,10 +383,16 @@ const handleVideoInfoReadyStateChange = (isReady: boolean) => {
             </header>
 
             <div class="divider"></div>
+            
+            <!-- Компонент проверки доступности сервисов -->
+            <div v-if="showServiceCheck" class="service-check-wrapper">
+              <ServiceAvailabilityCheck />
+            </div>
+            <div v-if="showServiceCheck && !vpnRequired && serviceCheckCompleted" class="divider"></div>
 
             <YouTubeInput 
-              :disabled="isProcessing"
-              :folder-select-disabled="!isVideoInfoReady || isProcessing"
+              :disabled="isProcessing || (showServiceCheck && vpnRequired)"
+              :folder-select-disabled="!isVideoInfoReady || isProcessing || (showServiceCheck && vpnRequired)"
               @video-info="handleVideoInfo"
               @language-detected="handleLanguageDetected"
               @download-start="handleDownloadStart"
@@ -359,6 +406,7 @@ const handleVideoInfoReadyStateChange = (isReady: boolean) => {
               @tts-progress="handleTTSProgress"
               @tts-complete="handleTTSComplete"
               @merge-progress="handleMergeProgress"
+              @clear-video-info="handleClearVideoInfo"
               :source-language="sourceLanguage"
               :target-language="selectedLanguages?.target?.name || ''"
               :target-language-code="selectedLanguages?.target?.code || ''"
@@ -561,6 +609,14 @@ main {
 
 .language-selector-section {
   margin: 0.5rem 0;
+}
+
+.service-check-wrapper {
+  margin-bottom: 1rem;
+  padding: 0.5rem;
+  border-radius: 8px;
+  background-color: rgba(var(--background-secondary-rgb, 255, 255, 255), 0.5);
+  transition: all 0.3s ease;
 }
 
 @media (max-width: 1200px) {

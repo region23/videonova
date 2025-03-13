@@ -80,6 +80,11 @@ const translatedVttPath = ref<string | null>(null)
 const ttsAudioPath = ref<string | null>(null)
 const videoPath = ref<string | null>(null)
 
+// Listen for clear-video-info event
+listen('clear-video-info', () => {
+  youtubeUrl.value = '';
+});
+
 // Listen for audio-ready event and automatically start transcription
 listen('audio-ready', async (event) => {
   const path = event.payload as string
