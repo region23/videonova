@@ -1244,6 +1244,9 @@ function logStateChange(trigger: string) {
     }
   });
 }
+
+// Add computed property to determine if service check is showing
+const isServiceCheckVisible = computed(() => !currentStep.value && !translationComplete.value)
 </script>
 
 <template>
@@ -1268,7 +1271,7 @@ function logStateChange(trigger: string) {
     </div>
 
     <!-- Service Availability Check - показываем, когда нет активного процесса перевода -->
-    <ServiceAvailabilityCheck v-if="!currentStep && !translationComplete" class="service-check" />
+    <ServiceAvailabilityCheck v-if="isServiceCheckVisible" class="service-check" />
 
     <!-- Progress Stepper - показываем только когда есть активный шаг или процесс завершен -->
     <ProgressStepper 
@@ -1371,8 +1374,8 @@ function logStateChange(trigger: string) {
       <button @click="mergeError = null" class="error-dismiss">Dismiss</button>
     </div>
 
-    <!-- Empty state -->
-    <div v-if="(!videoInfo || shouldHideVideoInfo) && !internalIsLoading && !translationComplete" class="empty-state">
+    <!-- Empty state - отображаем только когда нет проверки сервисов -->
+    <div v-if="(!videoInfo || shouldHideVideoInfo) && !internalIsLoading && !translationComplete && !isServiceCheckVisible" class="empty-state">
       <div class="quick-start-guide">
         <h3>Quick Start Guide</h3>
         <div class="steps">
