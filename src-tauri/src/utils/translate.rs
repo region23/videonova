@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use log::{debug, info, error, warn};
+use log::{debug, info, error};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;

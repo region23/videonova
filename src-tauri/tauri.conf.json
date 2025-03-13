@@ -26,6 +26,7 @@
             "core:tray:default",
             "dialog:default",
             "opener:default",
+            "opener:allow-reveal-item-in-dir",
             "store:default"
           ]
         }

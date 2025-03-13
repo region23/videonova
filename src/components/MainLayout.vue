@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { listen, emit } from '@tauri-apps/api/event'  // Add 'emit' here
+import { listen, emit } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 import { Store as TauriStore } from '@tauri-apps/plugin-store'
 import YouTubeInput from './YouTubeInput.vue'
@@ -83,19 +83,23 @@ const ttsProgress = ref<any>(null)
 const mergeProgress = ref<any>(null)
 
 onMounted(async () => {
-  unlisten = await listen('show-settings', () => {
-    showApiKeyUpdate.value = true
-  })
+  try {
+    unlisten = await listen('show-settings', () => {
+      showApiKeyUpdate.value = true
+    })
 
-  // Add listener for merge-complete event
-  const unlistenMergeComplete = await listen('merge-complete', () => {
-    handleMergeComplete()
-  })
-
-  onUnmounted(() => {
-    unlisten?.()
-    unlistenMergeComplete?.()
-  })
+    // Add listener for merge-complete event
+    const unlistenMergeComplete = await listen('merge-complete', () => {
+      handleMergeComplete()
+    })
+    
+    onUnmounted(() => {
+      unlisten?.()
+      unlistenMergeComplete?.()
+    })
+  } catch (e) {
+    console.error('Ошибка при настройке слушателей событий:', e);
+  }
 })
 
 const handleVideoInfo = (info: VideoInfo) => {
@@ -323,6 +327,12 @@ const handleVideoInfoReadyStateChange = (isReady: boolean) => {
     isSourceLanguageDetected.value = false
   }
 }
+
+const handleClearVideoInfo = () => {
+  videoInfo.value = null;
+  currentUrl.value = '';
+  isVideoInfoReady.value = false;
+}
 </script>
 
 <template>
@@ -342,7 +352,7 @@ const handleVideoInfoReadyStateChange = (isReady: boolean) => {
             </header>
 
             <div class="divider"></div>
-
+            
             <YouTubeInput 
               :disabled="isProcessing"
               :folder-select-disabled="!isVideoInfoReady || isProcessing"
@@ -359,6 +369,7 @@ const handleVideoInfoReadyStateChange = (isReady: boolean) => {
               @tts-progress="handleTTSProgress"
               @tts-complete="handleTTSComplete"
               @merge-progress="handleMergeProgress"
+              @clear-video-info="handleClearVideoInfo"
               :source-language="sourceLanguage"
               :target-language="selectedLanguages?.target?.name || ''"
               :target-language-code="selectedLanguages?.target?.code || ''"

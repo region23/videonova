@@ -80,6 +80,11 @@ const translatedVttPath = ref<string | null>(null)
 const ttsAudioPath = ref<string | null>(null)
 const videoPath = ref<string | null>(null)
 
+// Listen for clear-video-info event
+listen('clear-video-info', () => {
+  youtubeUrl.value = '';
+});
+
 // Listen for audio-ready event and automatically start transcription
 listen('audio-ready', async (event) => {
   const path = event.payload as string
@@ -125,8 +130,8 @@ const selectFolder = async () => {
     })
     if (selected) {
       selectedPath.value = selected as string
-      // Отправляем информацию о пути и URL сразу после выбора папки
-      if (youtubeUrl.value) {
+      // Only emit start-download if we have a valid URL and video info is loaded
+      if (youtubeUrl.value && !isLoading.value) {
         emit('start-download', youtubeUrl.value, selectedPath.value)
       }
     }
@@ -402,7 +407,7 @@ const normalizeLanguageCode = (code: string): string => {
             type="button" 
             class="folder-button" 
             @click="selectFolder"
-            :disabled="disabled || isLoading || folderSelectDisabled"
+            :disabled="disabled"
             :title="selectedPath || 'Select folder where the video will be downloaded'"
           >
             <span class="button-content">

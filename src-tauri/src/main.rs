@@ -8,7 +8,6 @@ use tauri_plugin_store::StoreExt;
 
 mod commands;
 mod utils;
-extern crate tts_sync;
 
 fn main() {
     // Инициализируем логгер с тонкой настройкой
@@ -49,6 +48,35 @@ fn main() {
                     error!("Failed to initialize tools: {}", e);
                 }
             });
+            
+            // Проверка доступности сервисов при запуске приложения
+            if let Some(main_window) = app.get_webview_window("main") {
+                // Клонируем окно для использования в асинхронном контексте
+                let window_clone = main_window.clone();
+                
+                tauri::async_runtime::spawn(async move {
+                    // Небольшая задержка перед проверкой, чтобы приложение успело загрузиться
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    
+                    // Проверяем доступность сервисов
+                    match commands::check_services_availability(window_clone, None).await {
+                        Ok(result) => {
+                            if result.vpn_required {
+                                log::warn!("VPN required: YouTube available: {}, OpenAI available: {}", 
+                                          result.youtube_available, 
+                                          result.openai_available);
+                            } else {
+                                log::info!("All services are available");
+                            }
+                        },
+                        Err(e) => {
+                            log::error!("Failed to check services availability: {}", e);
+                        }
+                    }
+                });
+            } else {
+                log::error!("Main window not found");
+            }
 
             Ok(())
         })
@@ -71,6 +99,11 @@ fn main() {
             commands::generate_speech,
             commands::process_video,
             commands::check_file_exists_command,
+            commands::cleanup_temp_files,
+            commands::open_file,
+            commands::check_services_availability,
+            commands::check_youtube_availability,
+            commands::check_openai_availability,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
