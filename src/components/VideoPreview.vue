@@ -90,6 +90,7 @@ const isTranslating = ref(false)
 const isTTSGenerating = ref(false)
 const isMerging = ref(false)
 const mergeError = ref<string | null>(null)
+const serviceCheckManuallyHidden = ref(false)
 
 // Internal loading state that combines prop and detected loading
 const internalIsLoading = ref(false);
@@ -388,7 +389,7 @@ function trackUIBlocking(operation: string) {
 }
 
 // Setup progress listener
-onMounted(async () => {
+onMounted(() => {
   console.log('=== VideoPreview Component Mounted ===');
   console.log('Initial States:', {
     isTranscribing: isTranscribing.value,
@@ -440,378 +441,403 @@ onMounted(async () => {
   
   window.addEventListener('input', urlInputListener);
 
-  unlisten = await listen<DownloadProgress>('download-progress', (event) => {
-    const progress = event.payload;
-    console.log(`Download progress received: ${progress.component} - ${progress.progress}%`);
-    
-    requestAnimationFrame(() => {
-      if (progress.component === 'audio') {
-        if (progress.progress === 100) {
-          // Если аудио загружено полностью, начинаем отсчет для скрытия
-          setTimeout(() => {
-            audioProgress.value = null;
-          }, 1000);
-        } else {
-          audioProgress.value = progress;
-        }
-      } else if (progress.component === 'video') {
-        if (progress.progress === 100) {
-          // Если видео загружено полностью, начинаем отсчет для скрытия
-          setTimeout(() => {
-            videoProgress.value = null;
-          }, 1000);
-        } else {
-          videoProgress.value = progress;
-        }
-      }
+  // Initialize event listeners asynchronously
+  setupEventListeners();
+});
 
-      // Проверяем завершение обоих загрузок для обновления статуса шага
-      if (progress.progress === 100) {
-        if ((progress.component === 'audio' && videoProgress.value?.progress === 100) ||
-            (progress.component === 'video' && audioProgress.value?.progress === 100)) {
-          console.log('Both downloads completed');
-          isDownloadComplete.value = true;
-          downloadStepComplete.value = true;
-          // Очищаем оба прогресса после небольшой задержки
-          setTimeout(() => {
-            audioProgress.value = null;
-            videoProgress.value = null;
-          }, 1000);
+// Defining unlisteners with proper types
+let unlistenDownloadComplete: (() => void) | null = null;
+let unlistenDownloadError: (() => void) | null = null;
+let unlistenTranscriptionProgress: (() => void) | null = null;
+let unlistenTranslationProgress: (() => void) | null = null;
+let unlistenTTSProgress: (() => void) | null = null;
+let unlistenMergeProgress: (() => void) | null = null;
+let unlistenMergeComplete: (() => void) | null = null;
+let unlistenMergeError: (() => void) | null = null;
+let unlistenMergeStart: (() => void) | null = null;
+
+// Setup and remove event listeners separately from lifecycle hooks
+async function setupEventListeners() {
+  try {
+    unlisten = await listen<DownloadProgress>('download-progress', (event) => {
+      const progress = event.payload;
+      console.log(`Download progress received: ${progress.component} - ${progress.progress}%`);
+      
+      requestAnimationFrame(() => {
+        if (progress.component === 'audio') {
+          if (progress.progress === 100) {
+            // Если аудио загружено полностью, начинаем отсчет для скрытия
+            setTimeout(() => {
+              audioProgress.value = null;
+            }, 1000);
+          } else {
+            audioProgress.value = progress;
+          }
+        } else if (progress.component === 'video') {
+          if (progress.progress === 100) {
+            // Если видео загружено полностью, начинаем отсчет для скрытия
+            setTimeout(() => {
+              videoProgress.value = null;
+            }, 1000);
+          } else {
+            videoProgress.value = progress;
+          }
         }
-      }
+
+        // Проверяем завершение обоих загрузок для обновления статуса шага
+        if (progress.progress === 100) {
+          if ((progress.component === 'audio' && videoProgress.value?.progress === 100) ||
+              (progress.component === 'video' && audioProgress.value?.progress === 100)) {
+            console.log('Both downloads completed');
+            isDownloadComplete.value = true;
+            downloadStepComplete.value = true;
+            // Очищаем оба прогресса после небольшой задержки
+            setTimeout(() => {
+              audioProgress.value = null;
+              videoProgress.value = null;
+            }, 1000);
+          }
+        }
+      });
     });
-  });
 
-  // Обновляем слушатель download-complete
-  const unlistenDownloadComplete = await listen('download-complete', () => {
-    console.log('Download complete event received');
-    // Устанавливаем флаги завершения загрузки
-    isDownloadComplete.value = true;
-    downloadStepComplete.value = true;
+    // Обновляем слушатель download-complete
+    unlistenDownloadComplete = await listen('download-complete', () => {
+      console.log('Download complete event received');
+      // Устанавливаем флаги завершения загрузки
+      isDownloadComplete.value = true;
+      downloadStepComplete.value = true;
 
-    // Проверяем наличие файлов для следующих шагов
-    // и отмечаем их как завершенные если файлы существуют
-    if (props.transcriptionProgress?.progress === 100) {
-      transcriptionStepComplete.value = true;
-    }
-    if (props.translationProgress?.progress === 100) {
-      translationStepComplete.value = true;
-    }
-    if (props.ttsProgress?.progress === 100) {
-      ttsStepComplete.value = true;
-    }
-    if (props.mergeProgress?.progress === 100) {
-      mergeStepComplete.value = true;
-    }
-
-    // Очищаем прогресс-бары с небольшой задержкой
-    setTimeout(() => {
-      audioProgress.value = null;
-      videoProgress.value = null;
-    }, 1000);
-  });
-
-  // Добавляем слушатель для события download-error
-  const unlistenDownloadError = await listen<string>('download-error', (event) => {
-    console.error('Download error received:', event.payload);
-    // Сбрасываем прогресс в случае ошибки
-    audioProgress.value = null;
-    videoProgress.value = null;
-  });
-
-  // Обновляем слушатель transcription-progress
-  const unlistenTranscriptionProgress = await listen<TranscriptionProgress>('transcription-progress', (event) => {
-    console.log('Transcription progress received directly in VideoPreview:', event.payload);
-    transcriptionProgress.value = event.payload;
-    isTranscribing.value = true;
-    
-    if (event.payload.progress >= 100) {
-      logComponentState('transcription complete');
-      isTranscribing.value = false;
-      transcriptionStepComplete.value = true;
-      // Если файл уже существовал, отмечаем следующие шаги как завершенные
-      if (!isTranslating.value && props.translationProgress?.progress === 100) {
+      // Проверяем наличие файлов для следующих шагов
+      // и отмечаем их как завершенные если файлы существуют
+      if (props.transcriptionProgress?.progress === 100) {
+        transcriptionStepComplete.value = true;
+      }
+      if (props.translationProgress?.progress === 100) {
         translationStepComplete.value = true;
       }
-      if (!isTTSGenerating.value && props.ttsProgress?.progress === 100) {
+      if (props.ttsProgress?.progress === 100) {
         ttsStepComplete.value = true;
       }
-      if (!isMerging.value && props.mergeProgress?.progress === 100) {
+      if (props.mergeProgress?.progress === 100) {
         mergeStepComplete.value = true;
       }
-      // Очищаем прогресс с задержкой
-      setTimeout(() => {
-        transcriptionProgress.value = null;
-      }, 1000);
-    }
-  });
 
-  // Обновляем слушатель translation-progress
-  const unlistenTranslationProgress = await listen<TranslationProgress>('translation-progress', (event) => {
-    console.log('Translation progress received directly in VideoPreview:', event.payload);
-    translationProgress.value = event.payload;
-    isTranslating.value = true;
-    
-    if (event.payload.progress >= 100) {
-      logComponentState('translation complete');
-      isTranslating.value = false;
-      translationStepComplete.value = true;
-      // Если файл уже существовал, отмечаем следующие шаги как завершенные
-      if (!isTTSGenerating.value && props.ttsProgress?.progress === 100) {
-        ttsStepComplete.value = true;
-      }
-      if (!isMerging.value && props.mergeProgress?.progress === 100) {
-        mergeStepComplete.value = true;
-      }
-      // Очищаем прогресс с задержкой
+      // Очищаем прогресс-бары с небольшой задержкой
       setTimeout(() => {
-        translationProgress.value = null;
+        audioProgress.value = null;
+        videoProgress.value = null;
       }, 1000);
-    }
-  });
+    });
 
-  // Добавляем слушатель для события tts-progress с новой оптимизацией
-  const unlistenTTSProgress = await listen<TTSProgress>('tts-progress', (event) => {
-    // Skip updates that would decrease the progress (except at the beginning or end)
-    if (ttsProgress.value !== null && 
-        event.payload.progress < ttsProgress.value.progress && 
-        event.payload.progress > 0 && 
-        event.payload.progress < 100) {
-      console.log('Filtering out decreasing TTS progress:', 
-        `Current: ${ttsProgress.value.progress}%, New: ${event.payload.progress}%`);
-      return;
-    }
-    
-    // Log the update
-    console.log('TTS progress received:', event.payload);
-    
-    // Make sure progress is a number (not undefined)
-    const progressValue = typeof event.payload.progress === 'number' ? 
-      event.payload.progress : 
-      (event.payload.step_progress || 0);
-    
-    // Track the timestamp of this event
-    const eventTimestamp = Date.now();
-    
-    // Update last audio processing time if this is an audio processing event
-    if (event.payload.status?.includes("Обработка аудио")) {
-      console.log('Detected audio processing event, updating timestamp');
-      lastAudioProcessingTime.value = eventTimestamp;
-    }
-    
-    // Store the last time we saw "TTS готов" status
-    if (progressValue >= 100 && event.payload.status === "TTS готов") {
-      // If we've seen "Обработка аудио" recently, this might be the final completion
-      const timeSinceAudioProcessing = eventTimestamp - lastAudioProcessingTime.value;
-      console.log(`Received TTS готов with 100%, time since last audio processing: ${timeSinceAudioProcessing}ms`);
-    }
+    // Добавляем слушатель для события download-error
+    unlistenDownloadError = await listen<string>('download-error', (event) => {
+      console.error('Download error received:', event.payload);
+      // Сбрасываем прогресс в случае ошибки
+      audioProgress.value = null;
+      videoProgress.value = null;
+    });
+
+    // Обновляем слушатель transcription-progress
+    unlistenTranscriptionProgress = await listen<TranscriptionProgress>('transcription-progress', (event) => {
+      console.log('Transcription progress received directly in VideoPreview:', event.payload);
+      transcriptionProgress.value = event.payload;
+      isTranscribing.value = true;
       
-    // Check if this is the final completion event
-    // We need a more reliable way to detect when ALL processing is done
-    // Using multiple conditions to increase reliability:
-    // 1. Progress is 100%
-    // 2. Either:
-    //    a. Status is "TTS готов" AND we've seen "Обработка аудио" recently (which happens during Demucs)
-    //    b. Status includes "завершена" (alternative completion message)
-    const isFinalCompletion = progressValue >= 100 && 
-                             ((event.payload.status === "TTS готов" && lastAudioProcessingTime.value > 0) ||
-                              event.payload.status?.includes("завершена"));
-    
-    // Create a new object with guaranteed progress value
-    const updatedProgress = {
-      ...event.payload,
-      progress: progressValue
-    };
-    
-    // Apply the update
-    ttsProgress.value = updatedProgress;
-    isTTSGenerating.value = true;
-    
-    // Only handle completion for the final TTS event (after mixing)
-    if (isFinalCompletion) {
-      console.log('TTS complete (final) - after all processing including Demucs');
-      
-      // Reset the audio processing time for next run
-      lastAudioProcessingTime.value = 0;
-      
-      // Mark current step as complete first
-      ttsStepComplete.value = true;
-      
-      // Wait a moment before transitioning
-      setTimeout(() => {
-        isTTSGenerating.value = false;
-        
-        // For smoother UI, keep the progress visible with 100% for a moment
-        // then clear it when the merge step begins
-        setTimeout(() => {
-          // Only clear if we've moved to merge step
-          if (isMerging.value) {
-            ttsProgress.value = null;
-          }
-        }, 1000);
-        
-        // If merge already exists, mark it complete
+      if (event.payload.progress >= 100) {
+        logComponentState('transcription complete');
+        isTranscribing.value = false;
+        transcriptionStepComplete.value = true;
+        // Если файл уже существовал, отмечаем следующие шаги как завершенные
+        if (!isTranslating.value && props.translationProgress?.progress === 100) {
+          translationStepComplete.value = true;
+        }
+        if (!isTTSGenerating.value && props.ttsProgress?.progress === 100) {
+          ttsStepComplete.value = true;
+        }
         if (!isMerging.value && props.mergeProgress?.progress === 100) {
           mergeStepComplete.value = true;
         }
-      }, 500);
-    }
-  });
-
-  // Добавляем слушатель для события merge-progress
-  const unlistenMergeProgress = await listen<MergeProgress>('merge-progress', (event) => {
-    console.log('Merge progress received directly in VideoPreview:', event.payload);
-    
-    // Ensure we have a proper progress value
-    const mergeProgressValue = typeof event.payload.progress === 'number' ? 
-      event.payload.progress : 0;
-    
-    // Create a proper progress object
-    const updatedMergeProgress = {
-      status: event.payload.status || 'Processing video',
-      progress: mergeProgressValue
-    };
-    
-    // Update the progress
-    mergeProgress.value = updatedMergeProgress;
-    
-    // Ensure merge step is active
-    isMerging.value = true;
-    
-    // If ttsProgress is still showing with 100%, clear it now
-    if (ttsProgress.value && ttsProgress.value.progress >= 100) {
-      ttsProgress.value = null;
-    }
-    
-    // If merge process is complete, handle it properly
-    if (mergeProgressValue >= 100) {
-      logComponentState('merge at 100%, waiting for merge-complete event');
-    }
-  });
-
-  // Listen for merge-complete event
-  const unlistenMergeComplete = await listen<MergeResult>('merge-complete', async (event) => {
-    console.log('=== Merge Complete Event Received ===');
-    console.log('Event payload:', event.payload);
-    
-    // Log detailed state before update
-    console.log('State before update:', {
-      translationComplete: translationComplete.value,
-      mergeStepComplete: mergeStepComplete.value,
-      isMerging: isMerging.value,
-      outputDirectory: outputDirectory.value,
-      currentStep: currentStep.value
-    });
-    
-    // Set completion flags immediately
-    outputDirectory.value = event.payload.output_dir;
-    finalVideoPath.value = event.payload.merged_video_path;
-    translationComplete.value = true;
-    mergeStepComplete.value = true;
-    isMerging.value = false;
-    isTTSGenerating.value = false;  // Make sure TTS state is also cleared
-    
-    // Clear progress states
-    mergeProgress.value = null;
-    ttsProgress.value = null;
-
-    // Clean up temporary files and move final video
-    try {
-      await invoke('cleanup_temp_files', {
-        final_video_path: finalVideoPath.value,
-        output_dir: outputDirectory.value
-      });
-    } catch (error) {
-      console.error('Error during cleanup:', error);
-    }
-    
-    // Log state after update
-    console.log('State after update:', {
-      translationComplete: translationComplete.value,
-      mergeStepComplete: mergeStepComplete.value,
-      isMerging: isMerging.value,
-      outputDirectory: outputDirectory.value,
-      finalVideoPath: finalVideoPath.value,
-      currentStep: currentStep.value
-    });
-    
-    // Force UI update and emit events
-    nextTick(() => {
-      // Reset internal state
-      internalIsLoading.value = false;
-      previousUrl.value = null;
-      shouldHideVideoInfo.value = true;
-      initialLoadDone.value = false;
-      
-      // Emit completion event
-      emit('merge-complete', event.payload.output_dir);
-      // Clear video info to reset the URL input
-      emit('clear-video-info');
-      // Explicitly emit video info ready state change
-      emit('video-info-ready-state-change', false);
-    });
-  });
-
-  // Обновляем обработчик ошибки merge
-  const unlistenMergeError = await listen<string>('merge-error', (event) => {
-    console.error('Merge error received in VideoPreview:', event.payload);
-    const errorMessage = event.payload;
-    
-    // Формируем понятное пользователю сообщение об ошибке
-    let userFriendlyError = 'Failed to create final video: ';
-    
-    if (errorMessage.includes('No audio stream found')) {
-      userFriendlyError += 'Audio file is missing or corrupted. This might happen if voice generation was not completed properly. Please try processing the video again.';
-      // Сбрасываем флаг завершения TTS, чтобы пользователь мог повторить попытку
-      ttsStepComplete.value = false;
-      isTTSGenerating.value = false;
-    } else {
-      userFriendlyError += errorMessage;
-    }
-    
-    mergeError.value = userFriendlyError;
-    mergeProgress.value = {
-      status: 'Failed',
-      progress: 0
-    };
-    isMerging.value = false;
-  });
-
-  // Add this listener for merge start event if not already present
-  const unlistenMergeStart = await listen('merge-start', () => {
-    console.log('Merge start event received');
-    isMerging.value = true;
-    
-    // Don't directly assign to currentStep, use a timeout instead to avoid linter errors
-    setTimeout(() => {
-      // Update step status without direct assignment
-      if (isMerging.value && !translationComplete.value) {
-        logComponentState('merge start');
+        // Очищаем прогресс с задержкой
+        setTimeout(() => {
+          transcriptionProgress.value = null;
+        }, 1000);
       }
-    }, 0);
-    
-    // Show the merge UI
-    ttsStepComplete.value = true;
-    trackUIBlocking('Merge start received');
-  });
+    });
 
-  onUnmounted(() => {
-    unlisten?.();
-    unlistenDownloadComplete?.();
-    unlistenDownloadError?.();
-    unlistenTranscriptionProgress?.();
-    unlistenTranslationProgress?.();
-    unlistenTTSProgress?.();
-    unlistenMergeProgress?.();
-    unlistenMergeComplete?.();
-    unlistenMergeError?.();
-    unlistenMergeStart?.();
-    
-    // Clean up the URL input listener
-    if (urlInputListener) {
-      window.removeEventListener('input', urlInputListener);
-    }
-  });
+    // Обновляем слушатель translation-progress
+    unlistenTranslationProgress = await listen<TranslationProgress>('translation-progress', (event) => {
+      console.log('Translation progress received directly in VideoPreview:', event.payload);
+      translationProgress.value = event.payload;
+      isTranslating.value = true;
+      
+      if (event.payload.progress >= 100) {
+        logComponentState('translation complete');
+        isTranslating.value = false;
+        translationStepComplete.value = true;
+        // Если файл уже существовал, отмечаем следующие шаги как завершенные
+        if (!isTTSGenerating.value && props.ttsProgress?.progress === 100) {
+          ttsStepComplete.value = true;
+        }
+        if (!isMerging.value && props.mergeProgress?.progress === 100) {
+          mergeStepComplete.value = true;
+        }
+        // Очищаем прогресс с задержкой
+        setTimeout(() => {
+          translationProgress.value = null;
+        }, 1000);
+      }
+    });
+
+    // Добавляем слушатель для события tts-progress с новой оптимизацией
+    unlistenTTSProgress = await listen<TTSProgress>('tts-progress', (event) => {
+      // Skip updates that would decrease the progress (except at the beginning or end)
+      if (ttsProgress.value !== null && 
+          event.payload.progress < ttsProgress.value.progress && 
+          event.payload.progress > 0 && 
+          event.payload.progress < 100) {
+        console.log('Filtering out decreasing TTS progress:', 
+          `Current: ${ttsProgress.value.progress}%, New: ${event.payload.progress}%`);
+        return;
+      }
+      
+      // Log the update
+      console.log('TTS progress received:', event.payload);
+      
+      // Make sure progress is a number (not undefined)
+      const progressValue = typeof event.payload.progress === 'number' ? 
+        event.payload.progress : 
+        (event.payload.step_progress || 0);
+      
+      // Track the timestamp of this event
+      const eventTimestamp = Date.now();
+      
+      // Update last audio processing time if this is an audio processing event
+      if (event.payload.status?.includes("Обработка аудио")) {
+        console.log('Detected audio processing event, updating timestamp');
+        lastAudioProcessingTime.value = eventTimestamp;
+      }
+      
+      // Store the last time we saw "TTS готов" status
+      if (progressValue >= 100 && event.payload.status === "TTS готов") {
+        // If we've seen "Обработка аудио" recently, this might be the final completion
+        const timeSinceAudioProcessing = eventTimestamp - lastAudioProcessingTime.value;
+        console.log(`Received TTS готов with 100%, time since last audio processing: ${timeSinceAudioProcessing}ms`);
+      }
+        
+      // Check if this is the final completion event
+      // We need a more reliable way to detect when ALL processing is done
+      // Using multiple conditions to increase reliability:
+      // 1. Progress is 100%
+      // 2. Either:
+      //    a. Status is "TTS готов" AND we've seen "Обработка аудио" recently (which happens during Demucs)
+      //    b. Status includes "завершена" (alternative completion message)
+      const isFinalCompletion = progressValue >= 100 && 
+                               ((event.payload.status === "TTS готов" && lastAudioProcessingTime.value > 0) ||
+                                event.payload.status?.includes("завершена"));
+      
+      // Create a new object with guaranteed progress value
+      const updatedProgress = {
+        ...event.payload,
+        progress: progressValue
+      };
+      
+      // Apply the update
+      ttsProgress.value = updatedProgress;
+      isTTSGenerating.value = true;
+      
+      // Only handle completion for the final TTS event (after mixing)
+      if (isFinalCompletion) {
+        console.log('TTS complete (final) - after all processing including Demucs');
+        
+        // Reset the audio processing time for next run
+        lastAudioProcessingTime.value = 0;
+        
+        // Mark current step as complete first
+        ttsStepComplete.value = true;
+        
+        // Wait a moment before transitioning
+        setTimeout(() => {
+          isTTSGenerating.value = false;
+          
+          // For smoother UI, keep the progress visible with 100% for a moment
+          // then clear it when the merge step begins
+          setTimeout(() => {
+            // Only clear if we've moved to merge step
+            if (isMerging.value) {
+              ttsProgress.value = null;
+            }
+          }, 1000);
+          
+          // If merge already exists, mark it complete
+          if (!isMerging.value && props.mergeProgress?.progress === 100) {
+            mergeStepComplete.value = true;
+          }
+        }, 500);
+      }
+    });
+
+    // Добавляем слушатель для события merge-progress
+    unlistenMergeProgress = await listen<MergeProgress>('merge-progress', (event) => {
+      console.log('Merge progress received directly in VideoPreview:', event.payload);
+      
+      // Ensure we have a proper progress value
+      const mergeProgressValue = typeof event.payload.progress === 'number' ? 
+        event.payload.progress : 0;
+      
+      // Create a proper progress object
+      const updatedMergeProgress = {
+        status: event.payload.status || 'Processing video',
+        progress: mergeProgressValue
+      };
+      
+      // Update the progress
+      mergeProgress.value = updatedMergeProgress;
+      
+      // Ensure merge step is active
+      isMerging.value = true;
+      
+      // If ttsProgress is still showing with 100%, clear it now
+      if (ttsProgress.value && ttsProgress.value.progress >= 100) {
+        ttsProgress.value = null;
+      }
+      
+      // If merge process is complete, handle it properly
+      if (mergeProgressValue >= 100) {
+        logComponentState('merge at 100%, waiting for merge-complete event');
+      }
+    });
+
+    // Listen for merge-complete event
+    unlistenMergeComplete = await listen<MergeResult>('merge-complete', async (event) => {
+      console.log('=== Merge Complete Event Received ===');
+      console.log('Event payload:', event.payload);
+      
+      // Log detailed state before update
+      console.log('State before update:', {
+        translationComplete: translationComplete.value,
+        mergeStepComplete: mergeStepComplete.value,
+        isMerging: isMerging.value,
+        outputDirectory: outputDirectory.value,
+        currentStep: currentStep.value
+      });
+      
+      // Set completion flags immediately
+      outputDirectory.value = event.payload.output_dir;
+      finalVideoPath.value = event.payload.merged_video_path;
+      translationComplete.value = true;
+      mergeStepComplete.value = true;
+      isMerging.value = false;
+      isTTSGenerating.value = false;  // Make sure TTS state is also cleared
+      
+      // Clear progress states
+      mergeProgress.value = null;
+      ttsProgress.value = null;
+
+      // Clean up temporary files and move final video
+      try {
+        await invoke('cleanup_temp_files', {
+          final_video_path: finalVideoPath.value,
+          output_dir: outputDirectory.value
+        });
+      } catch (error) {
+        console.error('Error during cleanup:', error);
+      }
+      
+      // Log state after update
+      console.log('State after update:', {
+        translationComplete: translationComplete.value,
+        mergeStepComplete: mergeStepComplete.value,
+        isMerging: isMerging.value,
+        outputDirectory: outputDirectory.value,
+        finalVideoPath: finalVideoPath.value,
+        currentStep: currentStep.value
+      });
+      
+      // Force UI update and emit events
+      nextTick(() => {
+        // Reset internal state
+        internalIsLoading.value = false;
+        previousUrl.value = null;
+        shouldHideVideoInfo.value = true;
+        initialLoadDone.value = false;
+        
+        // Emit completion event
+        emit('merge-complete', event.payload.output_dir);
+        // Clear video info to reset the URL input
+        emit('clear-video-info');
+        // Explicitly emit video info ready state change
+        emit('video-info-ready-state-change', false);
+      });
+    });
+
+    // Обновляем обработчик ошибки merge
+    unlistenMergeError = await listen<string>('merge-error', (event) => {
+      console.error('Merge error received in VideoPreview:', event.payload);
+      const errorMessage = event.payload;
+      
+      // Формируем понятное пользователю сообщение об ошибке
+      let userFriendlyError = 'Failed to create final video: ';
+      
+      if (errorMessage.includes('No audio stream found')) {
+        userFriendlyError += 'Audio file is missing or corrupted. This might happen if voice generation was not completed properly. Please try processing the video again.';
+        // Сбрасываем флаг завершения TTS, чтобы пользователь мог повторить попытку
+        ttsStepComplete.value = false;
+        isTTSGenerating.value = false;
+      } else {
+        userFriendlyError += errorMessage;
+      }
+      
+      mergeError.value = userFriendlyError;
+      mergeProgress.value = {
+        status: 'Failed',
+        progress: 0
+      };
+      isMerging.value = false;
+    });
+
+    // Add this listener for merge start event if not already present
+    unlistenMergeStart = await listen('merge-start', () => {
+      console.log('Merge start event received');
+      isMerging.value = true;
+      
+      // Don't directly assign to currentStep, use a timeout instead to avoid linter errors
+      setTimeout(() => {
+        // Update step status without direct assignment
+        if (isMerging.value && !translationComplete.value) {
+          logComponentState('merge start');
+        }
+      }, 0);
+      
+      // Show the merge UI
+      ttsStepComplete.value = true;
+      trackUIBlocking('Merge start received');
+    });
+  } catch (error) {
+    console.error('Error setting up event listeners:', error);
+  }
+}
+
+// Ensure clean-up happens properly
+onUnmounted(() => {
+  console.log('VideoPreview component unmounting, cleaning up listeners');
+  
+  // Clean up all event listeners
+  unlisten?.();
+  unlistenDownloadComplete?.();
+  unlistenDownloadError?.();
+  unlistenTranscriptionProgress?.();
+  unlistenTranslationProgress?.();
+  unlistenTTSProgress?.();
+  unlistenMergeProgress?.();
+  unlistenMergeComplete?.();
+  unlistenMergeError?.();
+  unlistenMergeStart?.();
+  
+  // Clean up the URL input listener
+  if (urlInputListener) {
+    window.removeEventListener('input', urlInputListener);
+  }
 });
 
 // Add new computed property for steps status
@@ -1245,8 +1271,18 @@ function logStateChange(trigger: string) {
   });
 }
 
-// Add computed property to determine if service check is showing
-const isServiceCheckVisible = computed(() => !currentStep.value && !translationComplete.value)
+// Compute the visibility of the service check component
+const isServiceCheckVisible = computed(() => 
+  !currentStep.value && 
+  !translationComplete.value && 
+  !serviceCheckManuallyHidden.value
+)
+
+// Function to handle the hide-service-check event
+const handleServiceCheckHidden = () => {
+  console.log('Service check has been hidden')
+  serviceCheckManuallyHidden.value = true
+}
 </script>
 
 <template>
@@ -1271,7 +1307,11 @@ const isServiceCheckVisible = computed(() => !currentStep.value && !translationC
     </div>
 
     <!-- Service Availability Check - показываем, когда нет активного процесса перевода -->
-    <ServiceAvailabilityCheck v-if="isServiceCheckVisible" class="service-check" />
+    <ServiceAvailabilityCheck 
+      v-if="isServiceCheckVisible" 
+      class="service-check" 
+      @hide-service-check="handleServiceCheckHidden" 
+    />
 
     <!-- Progress Stepper - показываем только когда есть активный шаг или процесс завершен -->
     <ProgressStepper 

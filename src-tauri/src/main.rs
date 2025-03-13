@@ -62,9 +62,9 @@ fn main() {
                     match commands::check_services_availability(window_clone, None).await {
                         Ok(result) => {
                             if result.vpn_required {
-                                log::warn!("VPN required: YouTube: {}, OpenAI: {}", 
-                                          !result.youtube_blocked, 
-                                          !result.openai_blocked);
+                                log::warn!("VPN required: YouTube available: {}, OpenAI available: {}", 
+                                          result.youtube_available, 
+                                          result.openai_available);
                             } else {
                                 log::info!("All services are available");
                             }

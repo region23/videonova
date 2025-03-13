@@ -1151,7 +1151,7 @@ pub async fn cleanup_temp_files(final_video_path: String, output_dir: String) ->
 
 /// Проверяет доступность YouTube из текущего местоположения
 /// 
-/// Эта функция выполняет HTTP-запрос к API YouTube и анализирует ответ.
+/// Эта функция выполняет HTTP-запрос к YouTube и анализирует ответ.
 /// Возвращает true, если YouTube доступен, и false, если он заблокирован.
 #[tauri::command]
 pub async fn check_youtube_availability() -> Result<bool, String> {
@@ -1159,75 +1159,70 @@ pub async fn check_youtube_availability() -> Result<bool, String> {
     
     // Создаем HTTP-клиент с увеличенным таймаутом и параметрами для определения проблем
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(5))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     
-    // Адреса для проверки доступности YouTube
-    let endpoints = [
-        "https://www.youtube.com/",
-        "https://www.googleapis.com/youtube/v3/search?part=id&maxResults=1",
-        "https://www.youtube.com/iframe_api"
-    ];
+    // Используем только прямой URL YouTube
+    let endpoint = "https://www.youtube.com/";
     
-    for endpoint in endpoints {
-        info!("Checking YouTube endpoint: {}", endpoint);
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.get(endpoint).send()
-        ).await {
-            Ok(Ok(response)) => {
-                let status = response.status();
-                info!("YouTube response status: {}", status);
-                
-                // Даже если мы получаем 403, это может означать, что сервис доступен, 
-                // но требует авторизации (особенно для API endpoints)
-                if status.is_success() || status.as_u16() == 403 {
-                    info!("YouTube is accessible");
-                    return Ok(true);
-                }
-                
-                // Получаем детали ответа для анализа
-                match response.text().await {
-                    Ok(text) => {
-                        // Проверяем на наличие признаков блокировки
-                        if text.contains("unavailable in your country") || 
-                           text.contains("доступ ограничен") ||
-                           text.contains("access denied") {
-                            info!("YouTube appears to be blocked: {}", text);
-                            return Ok(false);
-                        }
-                        
-                        // Если нет явных признаков блокировки, продолжаем проверку других эндпоинтов
-                    },
-                    Err(e) => warn!("Failed to read YouTube response body: {}", e)
-                }
-            },
-            Ok(Err(e)) => {
-                warn!("YouTube request failed: {}", e);
-                
-                // Анализируем тип ошибки
-                if e.is_connect() || e.is_timeout() {
-                    // Проблемы с соединением часто указывают на блокировку
-                    warn!("Connection problems suggest YouTube might be blocked");
-                }
-            },
-            Err(_) => {
-                warn!("YouTube request timed out");
-                // Тайм-аут может указывать на блокировку
+    info!("Checking YouTube endpoint: {}", endpoint);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.get(endpoint).send()
+    ).await {
+        Ok(Ok(response)) => {
+            let status = response.status();
+            info!("YouTube response status: {}", status);
+            
+            if status.is_success() {
+                info!("YouTube is accessible");
+                return Ok(true);
             }
+            
+            // Получаем детали ответа для анализа
+            match response.text().await {
+                Ok(text) => {
+                    // Проверяем на наличие признаков блокировки
+                    if text.contains("unavailable in your country") || 
+                       text.contains("доступ ограничен") ||
+                       text.contains("access denied") {
+                        info!("YouTube appears to be blocked: {}", text);
+                        return Ok(false);
+                    }
+                    
+                    // Если нет явных признаков блокировки, но статус не успешный, предполагаем проблемы с доступом
+                    info!("YouTube returned unsuccessful status but no explicit block indicators");
+                    return Ok(false);
+                },
+                Err(e) => {
+                    warn!("Failed to read YouTube response body: {}", e);
+                    return Ok(false);
+                }
+            }
+        },
+        Ok(Err(e)) => {
+            warn!("YouTube request failed: {}", e);
+            
+            // Анализируем тип ошибки
+            if e.is_connect() || e.is_timeout() {
+                // Проблемы с соединением часто указывают на блокировку
+                warn!("Connection problems suggest YouTube might be blocked");
+            }
+            return Ok(false);
+        },
+        Err(_) => {
+            warn!("YouTube request timed out");
+            // Тайм-аут может указывать на блокировку
+            return Ok(false);
         }
     }
-    
-    // Если все проверки не удались, вероятно YouTube заблокирован
-    info!("All YouTube checks failed, service appears to be blocked");
-    Ok(false)
 }
 
 /// Проверяет доступность OpenAI из текущего местоположения
 /// 
-/// Эта функция выполняет HTTP-запрос к публичным эндпоинтам OpenAI и анализирует ответ.
+/// Эта функция выполняет HTTP-запрос к ChatGPT и API OpenAI и анализирует ответ.
 /// Не требует ключа API, просто проверяет доступность сервиса.
 /// Возвращает true, если OpenAI доступен, и false, если он заблокирован.
 #[tauri::command]
@@ -1236,67 +1231,138 @@ pub async fn check_openai_availability() -> Result<bool, String> {
     
     // Создаем HTTP-клиент с увеличенным таймаутом
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(5))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     
-    // Проверяемые эндпоинты OpenAI (публичные, не требующие API ключа)
-    let endpoints = [
-        "https://openai.com/", 
-        "https://api.openai.com/v1/models",
-        "https://status.openai.com/"
-    ];
+    // Проверяем основной эндпоинт - ChatGPT
+    let endpoint = "https://chatgpt.com/?hints=search";
     
-    for endpoint in endpoints {
-        info!("Checking OpenAI endpoint: {}", endpoint);
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            client.get(endpoint).send()
-        ).await {
-            Ok(Ok(response)) => {
-                let status = response.status();
-                info!("OpenAI response status: {}", status);
-                
-                // Для моделей API нам достаточно получить 401 Unauthorized, это означает что API доступен
-                if status.is_success() || (endpoint.contains("api.openai.com") && status.as_u16() == 401) {
-                    info!("OpenAI is accessible");
-                    return Ok(true);
-                }
-                
-                // Получаем детали ответа для анализа
-                match response.text().await {
-                    Ok(text) => {
-                        // Проверяем на наличие признаков блокировки региона
-                        if text.contains("not available in your country") || 
-                           text.contains("регион не поддерживается") ||
-                           text.contains("service is not available") {
-                            info!("OpenAI appears to be blocked for your region: {}", text);
-                            return Ok(false);
-                        }
-                    },
-                    Err(e) => warn!("Failed to read OpenAI response body: {}", e)
-                }
-            },
-            Ok(Err(e)) => {
-                warn!("OpenAI request failed: {}", e);
-                
-                // Анализируем тип ошибки
-                if e.is_connect() || e.is_timeout() {
-                    // Проблемы с соединением часто указывают на блокировку
-                    warn!("Connection problems suggest OpenAI might be blocked");
-                }
-            },
-            Err(_) => {
-                warn!("OpenAI request timed out");
-                // Тайм-аут может указывать на блокировку
+    info!("Checking OpenAI endpoint: {}", endpoint);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.get(endpoint).send()
+    ).await {
+        Ok(Ok(response)) => {
+            let status = response.status();
+            info!("OpenAI response status: {}", status);
+            
+            if status.is_success() {
+                info!("OpenAI is accessible via ChatGPT");
+                return Ok(true);
             }
+            
+            // Получаем детали ответа для анализа
+            match response.text().await {
+                Ok(text) => {
+                    // Проверяем на наличие признаков блокировки региона
+                    if text.contains("not available in your country") || 
+                       text.contains("регион не поддерживается") ||
+                       text.contains("service is not available") {
+                        info!("OpenAI appears to be blocked for your region (ChatGPT check): {}", text);
+                        // Fall through to API check before concluding service is blocked
+                    } else {
+                        // Если нет явных признаков блокировки, но статус не успешный, продолжаем проверку
+                        info!("ChatGPT returned unsuccessful status but no explicit block indicators");
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to read ChatGPT response body: {}", e);
+                }
+            }
+        },
+        Ok(Err(e)) => {
+            warn!("ChatGPT request failed: {}", e);
+            
+            // Анализируем тип ошибки
+            if e.is_connect() || e.is_timeout() {
+                // Проблемы с соединением часто указывают на блокировку
+                warn!("Connection problems suggest ChatGPT might be blocked");
+            }
+            // Continue to API check, don't return early
+        },
+        Err(_) => {
+            warn!("ChatGPT request timed out");
+            // Continue to API check, don't return early
         }
     }
+
+    // Проверяем дополнительно основной API эндпоинт OpenAI
+    let api_endpoint = "https://api.openai.com/v1";
+    info!("Checking additional OpenAI API endpoint: {}", api_endpoint);
     
-    // Если все проверки не удались, вероятно OpenAI недоступен
-    info!("All OpenAI checks failed, service appears to be blocked");
-    Ok(false)
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.get(api_endpoint).send()
+    ).await {
+        Ok(Ok(response)) => {
+            let status = response.status();
+            info!("OpenAI API response status: {}", status);
+            
+            // API возвращает 404 для неавторизованных запросов к корневому пути - это нормально
+            // и означает, что API доступен
+            if status.is_success() || status.as_u16() == 404 || status.as_u16() == 401 {
+                info!("OpenAI API is accessible (returned expected status code)");
+                return Ok(true);
+            }
+            
+            // Получаем детали ответа для анализа
+            match response.text().await {
+                Ok(text) => {
+                    info!("Analyzing OpenAI API response: {}", text);
+                    
+                    // Проверяем на наличие специфичной ошибки блокировки региона в формате JSON
+                    if text.contains("unsupported_country_region_territory") || 
+                       text.contains("Country, region, or territory not supported") {
+                        info!("OpenAI API explicitly reports region blocking: {}", text);
+                        return Ok(false);
+                    }
+                    
+                    // Проверяем на наличие общих признаков блокировки региона
+                    if text.contains("not available in your country") || 
+                       text.contains("регион не поддерживается") ||
+                       text.contains("service is not available") {
+                        info!("OpenAI API appears to be blocked for your region: {}", text);
+                        return Ok(false);
+                    }
+                    
+                    // Если получен другой статус но без явных признаков блокировки,
+                    // то считаем услугу доступной (возможно, просто требуется авторизация)
+                    info!("OpenAI API returned non-success status but without block indicators");
+                    return Ok(true);
+                },
+                Err(e) => {
+                    warn!("Failed to read OpenAI API response body: {}", e);
+                    // Если не смогли прочитать ответ, пробуем сделать вывод по симптомам
+                    if status.as_u16() == 403 {
+                        warn!("API returned 403 Forbidden - likely region blocked");
+                        return Ok(false);
+                    }
+                    // В случае других ошибок при чтении, предполагаем, что сервис может быть доступен
+                    return Ok(true);
+                }
+            }
+        },
+        Ok(Err(e)) => {
+            warn!("OpenAI API request failed: {}", e);
+            
+            // Анализируем тип ошибки
+            if e.is_connect() || e.is_timeout() {
+                // Проблемы с соединением часто указывают на блокировку
+                warn!("Connection problems suggest OpenAI API might be blocked");
+                return Ok(false);
+            }
+            
+            // Другие типы ошибок могут быть связаны с временными проблемами, не обязательно блокировкой
+            return Ok(false);
+        },
+        Err(_) => {
+            warn!("OpenAI API request timed out");
+            // Тайм-аут может указывать на блокировку
+            return Ok(false);
+        }
+    }
 }
 
 /// Структура для передачи результатов проверки доступности сервисов
@@ -1305,14 +1371,13 @@ pub struct ServiceAvailabilityResult {
     pub youtube_available: bool,
     pub openai_available: bool,
     pub vpn_required: bool,
-    pub youtube_blocked: bool,
-    pub openai_blocked: bool,
     pub message: String,
     pub is_retry: bool,
 }
 
 /// Проверяет доступность всех нужных сервисов и возвращает результат
 /// с рекомендациями для пользователя о необходимости VPN
+/// Не показывает диалоговые окна - UI сам отобразит информацию пользователю
 #[tauri::command]
 pub async fn check_services_availability(window: tauri::WebviewWindow, is_retry: Option<bool>) -> Result<ServiceAvailabilityResult, String> {
     // Определяем, является ли эта проверка повторной
@@ -1325,9 +1390,25 @@ pub async fn check_services_availability(window: tauri::WebviewWindow, is_retry:
     
     info!("Checking availability of required services... (retry: {})", is_retry);
     
-    // Проверяем YouTube
+    // Создаем токен отмены, чтобы иметь возможность ограничить максимальное время всей проверки
+    let cancellation_token = tokio_util::sync::CancellationToken::new();
+    let ct_clone = cancellation_token.clone();
+    
+    // Устанавливаем таймаут для всей операции проверки в 5 секунд
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        ct_clone.cancel();
+    });
+    
+    // Проверяем YouTube с защитой от отмены
     let _ = window.emit("checking-youtube", ());
-    let youtube_available = match check_youtube_availability().await {
+    let youtube_available = match tokio::select! {
+        result = check_youtube_availability() => result,
+        _ = cancellation_token.cancelled() => {
+            warn!("YouTube availability check was cancelled due to timeout");
+            Ok(false) // Если проверка была отменена из-за таймаута, считаем сервис недоступным
+        }
+    } {
         Ok(available) => {
             info!("YouTube availability check result: {}", available);
             let _ = window.emit("youtube-check-complete", available);
@@ -1341,9 +1422,15 @@ pub async fn check_services_availability(window: tauri::WebviewWindow, is_retry:
         }
     };
     
-    // Проверяем OpenAI
+    // Проверяем OpenAI с защитой от отмены
     let _ = window.emit("checking-openai", ());
-    let openai_available = match check_openai_availability().await {
+    let openai_available = match tokio::select! {
+        result = check_openai_availability() => result,
+        _ = cancellation_token.cancelled() => {
+            warn!("OpenAI availability check was cancelled due to timeout");
+            Ok(false) // Если проверка была отменена из-за таймаута, считаем сервис недоступным
+        }
+    } {
         Ok(available) => {
             info!("OpenAI availability check result: {}", available);
             let _ = window.emit("openai-check-complete", available);
@@ -1373,15 +1460,12 @@ pub async fn check_services_availability(window: tauri::WebviewWindow, is_retry:
         if is_retry {
             format!(
                 "Сервисы все еще недоступны: {}. \
-                Пожалуйста, убедитесь, что VPN включен и корректно настроен. \
-                После настройки VPN нажмите 'OK' для повторной проверки.",
+                Пожалуйста, убедитесь, что VPN включен и корректно настроен.",
                 blocked_services.join(", ")
             )
         } else {
             format!(
-                "Для корректной работы приложения требуется VPN, так как следующие сервисы недоступны: {}. \
-                Пожалуйста, включите VPN и нажмите 'OK' для повторной проверки.",
-                blocked_services.join(", ")
+                "Для корректной работы приложения требуется VPN"
             )
         }
     } else {
@@ -1395,15 +1479,16 @@ pub async fn check_services_availability(window: tauri::WebviewWindow, is_retry:
     // Отправляем событие о завершении проверки
     let _ = window.emit("services-check-completed", json!({
         "vpn_required": vpn_required,
-        "is_retry": is_retry
+        "is_retry": is_retry,
+        "youtube_available": youtube_available,
+        "openai_available": openai_available,
+        "message": message
     }));
     
     Ok(ServiceAvailabilityResult {
         youtube_available,
         openai_available,
         vpn_required,
-        youtube_blocked: !youtube_available,
-        openai_blocked: !openai_available,
         message,
         is_retry,
     })

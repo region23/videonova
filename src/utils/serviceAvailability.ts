@@ -7,8 +7,6 @@ interface ServiceAvailabilityResult {
   youtube_available: boolean;
   openai_available: boolean;
   vpn_required: boolean;
-  youtube_blocked: boolean;
-  openai_blocked: boolean;
   message: string;
   is_retry: boolean;
 }
@@ -21,7 +19,7 @@ interface DialogOptions {
 
 /**
  * Проверяет доступность необходимых сервисов (YouTube и OpenAI)
- * и показывает диалоговое окно с рекомендациями, если сервисы недоступны
+ * без показа диалоговых окон - за отображение отвечает компонент UI
  * 
  * @param isRetry Указывает, что это повторная проверка после включения VPN
  * @returns Результат проверки доступности сервисов
@@ -33,59 +31,17 @@ export async function checkServicesAvailability(isRetry: boolean = false): Promi
       is_retry: isRetry 
     });
     
-    // Если VPN требуется, показываем диалоговое окно
-    if (result.vpn_required) {
-      const dialogOptions: DialogOptions = {
-        title: isRetry ? 'VPN все еще требуется' : 'Требуется VPN',
-        kind: 'warning'
-      };
-      
-      try {
-        // Показываем диалоговое окно и ждем, пока пользователь нажмет OK
-        await message(result.message, dialogOptions);
-        
-        // Выполняем повторную проверку после закрытия диалога
-        console.log('Пользователь закрыл диалог, выполняем повторную проверку...');
-        return await checkServicesAvailability(true);
-      } catch (e) {
-        // Если произошла ошибка при показе диалога, просто возвращаем результат
-        console.error('Ошибка при показе диалога:', e);
-        return result;
-      }
-    } else if (isRetry) {
-      // Если это повторная проверка и VPN теперь работает, показываем сообщение об успехе
-      try {
-        await message(result.message, { 
-          title: 'VPN работает', 
-          kind: 'info' 
-        });
-      } catch (e) {
-        console.error('Ошибка при показе успешного диалога:', e);
-      }
-    }
-    
+    // Просто возвращаем результат без показа диалоговых окон
+    // UI компонент ServiceAvailabilityCheck сам отобразит необходимую информацию
     return result;
   } catch (error) {
     console.error('Ошибка при проверке доступности сервисов:', error);
     
-    // В случае ошибки показываем диалоговое окно с сообщением об ошибке
-    try {
-      await message(
-        `Произошла ошибка при проверке доступности сервисов: ${error}. 
-        Пожалуйста, проверьте ваше интернет-соединение и попробуйте снова.`,
-        { title: 'Ошибка проверки', kind: 'error' }
-      );
-    } catch (e) {
-      console.error('Не удалось показать диалог с ошибкой:', e);
-    }
-    
-    // Возвращаем объект с ошибкой
+    // Возвращаем объект с ошибкой без показа диалога
     return {
       youtube_available: false,
       openai_available: false,
       vpn_required: true,
-      youtube_blocked: true,
-      openai_blocked: true,
       message: `Ошибка проверки: ${error}`,
       is_retry: isRetry
     };
@@ -105,7 +61,7 @@ export function setupServiceCheckListeners(callbacks: {
   onYouTubeResult?: (available: boolean) => void;
   onOpenAIChecking?: () => void;
   onOpenAIResult?: (available: boolean) => void;
-  onCheckCompleted?: (result: { vpn_required: boolean, is_retry: boolean }) => void;
+  onCheckCompleted?: (result: ServiceAvailabilityResult) => void;
 }): Promise<() => Promise<void>> {
   // Массив функций для удаления слушателей
   const unlisteners: Promise<UnlistenFn>[] = [];
@@ -136,7 +92,8 @@ export function setupServiceCheckListeners(callbacks: {
   
   // Слушаем событие завершения проверки
   unlisteners.push(listen('services-check-completed', (event) => {
-    const data = event.payload as { vpn_required: boolean, is_retry: boolean };
+    // Обновляем типизацию, чтобы включить все поля, которые отправляет бэкенд
+    const data = event.payload as ServiceAvailabilityResult;
     callbacks.onCheckCompleted?.(data);
   }));
   
