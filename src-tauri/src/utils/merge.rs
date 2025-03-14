@@ -320,11 +320,18 @@ pub async fn merge_files(
         .arg("192k")
         // Subtitle settings
         .arg("-c:s")
-        .arg("mov_text")
+        .arg("mov_text") // Using standard mov_text encoder
         .arg("-disposition:s:0")
         .arg("none")
         .arg("-disposition:s:1")
         .arg("none")
+        // QuickTime specific compatibility flags
+        .arg("-movflags")
+        .arg("+faststart+rtphint")
+        .arg("-tag:v")
+        .arg("avc1")
+        .arg("-tag:a")
+        .arg("mp4a")
         // Set metadata for audio tracks
         // First audio track (translated + instrumental)
         .arg("-metadata:s:a:0")

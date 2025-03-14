@@ -476,10 +476,11 @@ async fn enhanced_tts_with_logging(
                     
                     // Create audio processing configuration with sensible defaults
                     let audio_config = AudioProcessingConfig {
-                        window_size: 4096,
-                        hop_size: 1024,
+                        window_size: 512,
+                        hop_size: 256,
                         target_peak_level: 0.8,
                         voice_to_instrumental_ratio: 0.6,
+                        instrumental_boost: 1.5,
                     };
                     
                     // Create the sync configuration

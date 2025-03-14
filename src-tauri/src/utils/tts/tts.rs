@@ -300,6 +300,8 @@ pub struct AudioProcessingConfig {
     /// Баланс между голосом и инструментальной дорожкой (0.0 - 1.0)
     /// 0.5 означает равный баланс
     pub voice_to_instrumental_ratio: f32,
+    /// Коэффициент усиления инструментальной дорожки (1.0 = без изменений)
+    pub instrumental_boost: f32,
 }
 
 impl Default for AudioProcessingConfig {
@@ -308,7 +310,8 @@ impl Default for AudioProcessingConfig {
             window_size: 512,
             hop_size: 256,
             target_peak_level: 0.8,
-            voice_to_instrumental_ratio: 0.5, // Равный баланс между голосом и музыкой
+            voice_to_instrumental_ratio: 0.4, // Баланс: 40% голос, 60% музыка
+            instrumental_boost: 1.5, // Усиление инструментальной дорожки в 1.5 раза
         }
     }
 }
@@ -1172,9 +1175,9 @@ pub mod audio {
     }
 
     /// Микширует две аудиодорожки с заданным соотношением
-    pub fn mix_audio_tracks(voice: &[f32], instrumental: &[f32], voice_ratio: f32) -> Vec<f32> {
+    pub fn mix_audio_tracks(voice: &[f32], instrumental: &[f32], voice_ratio: f32, instrumental_boost: f32) -> Vec<f32> {
         let voice_gain = voice_ratio;
-        let instrumental_gain = 1.0 - voice_ratio;
+        let instrumental_gain = (1.0 - voice_ratio) * instrumental_boost;
         
         let max_len = voice.len().max(instrumental.len());
         let mut mixed = Vec::with_capacity(max_len);
@@ -1183,7 +1186,11 @@ pub mod audio {
             let voice_sample = if i < voice.len() { voice[i] } else { 0.0 };
             let instrumental_sample = if i < instrumental.len() { instrumental[i] } else { 0.0 };
             
-            mixed.push(voice_sample * voice_gain + instrumental_sample * instrumental_gain);
+            // Микшируем с учетом усиления инструментальной дорожки
+            let mixed_sample = voice_sample * voice_gain + instrumental_sample * instrumental_gain;
+            
+            // Предотвращаем клиппинг
+            mixed.push(mixed_sample.clamp(-1.0, 1.0));
         }
         
         mixed
@@ -1795,7 +1802,8 @@ pub mod synchronizer {
                             final_audio = audio::mix_audio_tracks(
                                 &final_audio,
                                 &instrumental_audio,
-                                config.audio_config.voice_to_instrumental_ratio
+                                config.audio_config.voice_to_instrumental_ratio,
+                                config.audio_config.instrumental_boost
                             );
                             
                             // Сохраняем микшированную версию для отладки
