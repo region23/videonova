@@ -6,7 +6,7 @@ import { Store as TauriStore } from '@tauri-apps/plugin-store'
 import YouTubeInput from './YouTubeInput.vue'
 import LanguageSelector from './LanguageSelector.vue'
 import VideoPreview from './VideoPreview.vue'
-import ApiKeyInput from './ApiKeyInput.vue'
+import SettingsInput from './SettingsInput.vue'
 import appLogo from '../assets/app_icon_2.png'
 
 interface Language {
@@ -61,7 +61,7 @@ const isProcessing = ref(false)
 const error = ref('')
 const selectedLanguages = ref<LanguagePair | null>(null)
 const videoInfo = ref<VideoInfo | null>(null)
-const showApiKeyUpdate = ref(false)
+const showSettings = ref(false)
 const sourceLanguage = ref('')
 const currentUrl = ref('')
 const selectedPath = ref('')
@@ -85,10 +85,9 @@ const mergeProgress = ref<any>(null)
 onMounted(async () => {
   try {
     unlisten = await listen('show-settings', () => {
-      showApiKeyUpdate.value = true
+      showSettings.value = true
     })
-
-    // Add listener for merge-complete event
+    
     const unlistenMergeComplete = await listen('merge-complete', () => {
       handleMergeComplete()
     })
@@ -224,12 +223,12 @@ const handleLanguagesSelected = (languages: LanguagePair) => {
   selectedLanguages.value = languages
 }
 
-const handleCancelUpdate = () => {
-  showApiKeyUpdate.value = false
+const handleSettingsSaved = () => {
+  showSettings.value = false
 }
 
-const handleApiKeyUpdated = () => {
-  showApiKeyUpdate.value = false
+const handleCancelSettings = () => {
+  showSettings.value = false
 }
 
 const handleStartDownload = async (url: string, path: string) => {
@@ -250,7 +249,7 @@ const handleProcessClick = async () => {
     if (!apiKey) {
       console.warn('Process aborted: No API key found')
       error.value = 'Please set your OpenAI API key in settings first'
-      showApiKeyUpdate.value = true
+      showSettings.value = true
       return
     }
 
@@ -264,11 +263,16 @@ const handleProcessClick = async () => {
     mergeProgress.value = null
 
     try {
+      // Log to help diagnose source language handling
+      console.log('Starting process with source language:', sourceLanguage.value, 'Selected languages:', selectedLanguages.value)
+      
       const result = await invoke<ProcessVideoResult>('process_video', {
         url: currentUrl.value,
         outputPath: selectedPath.value,
         targetLanguage: selectedLanguages.value.target.code,
         targetLanguageName: selectedLanguages.value.target.name,
+        sourceLanguageCode: selectedLanguages.value.source.code,
+        sourceLanguageName: selectedLanguages.value.source.name,
         apiKey: apiKey,
         voice: 'nova',
         model: 'tts-1',
@@ -337,7 +341,7 @@ const handleClearVideoInfo = () => {
 
 <template>
   <div class="main-layout">
-    <div v-if="!showApiKeyUpdate">
+    <div v-if="!showSettings">
       <main>
         <div class="content-wrapper">
           <div class="content-card main-content">
@@ -420,11 +424,12 @@ const handleClearVideoInfo = () => {
       </main>
     </div>
 
-    <ApiKeyInput
-      v-if="showApiKeyUpdate"
+    <!-- Settings Dialog -->
+    <SettingsInput
+      v-if="showSettings"
       mode="update"
-      @apiKeySet="handleApiKeyUpdated"
-      @cancel="handleCancelUpdate"
+      @settingsSaved="handleSettingsSaved"
+      @cancel="handleCancelSettings"
     />
   </div>
 </template>

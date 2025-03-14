@@ -58,7 +58,7 @@ struct Choice {
     message: Message,
 }
 
-// Parse VTT file into segments
+/// Parse VTT file into segments
 async fn parse_vtt_file(vtt_path: &Path) -> Result<VttFile> {
     debug!("Parsing VTT file: {}", vtt_path.display());
     
@@ -126,7 +126,7 @@ async fn parse_vtt_file(vtt_path: &Path) -> Result<VttFile> {
     Ok(VttFile { header, segments })
 }
 
-// Translate a batch of VTT segments
+/// Translate a batch of VTT segments
 async fn translate_segments(
     segments: &[VttSegment],
     target_language: &str,
@@ -249,7 +249,15 @@ async fn translate_segments(
     Ok(translated_segments)
 }
 
-// Translate VTT file
+/// Translate WebVTT file to target language
+/// 
+/// # Arguments
+/// * `vtt_path` - Path to the source VTT file
+/// * `output_dir` - Directory where the translated file will be saved
+/// * `target_language_code` - ISO code of the target language (e.g., "es", "fr")
+/// * `target_language_name` - Full name of the target language (e.g., "Spanish", "French")
+/// * `api_key` - OpenAI API key
+/// * `progress_sender` - Optional channel for sending progress updates
 pub async fn translate_vtt(
     vtt_path: &Path,
     output_dir: &Path,
@@ -258,111 +266,123 @@ pub async fn translate_vtt(
     api_key: &str,
     progress_sender: Option<mpsc::Sender<TranslationProgress>>,
 ) -> Result<PathBuf> {
-    info!("Starting VTT translation to {}", target_language_name);
+    info!("Starting translation of VTT file to {}", target_language_name);
+    
+    // Validate API key
+    if api_key.trim().is_empty() {
+        error!("OpenAI API key is empty");
+        return Err(anyhow!("OpenAI API key is required for translation"));
+    }
     
     // Create output directory if it doesn't exist
-    fs::create_dir_all(output_dir).await?;
+    if let Err(e) = fs::create_dir_all(output_dir).await {
+        error!("Failed to create output directory: {}", e);
+        return Err(anyhow!("Failed to create output directory: {}", e));
+    }
     
-    // Create output file path with language suffix
+    // Define output file path
     let file_stem = vtt_path
         .file_stem()
         .ok_or_else(|| anyhow!("Failed to get file stem"))?
         .to_string_lossy();
     
-    let sanitized_file_stem = sanitize_filename(&file_stem);
-    let output_path = output_dir.join(format!("{}_{}.vtt", sanitized_file_stem, target_language_code));
-    debug!("Output will be saved to: {}", output_path.display());
-
+    // Process filename - add language code suffix
+    let sanitized_file_stem = sanitize_filename(&format!("{}_{}", file_stem, target_language_code));
+    let output_path = output_dir.join(format!("{}.vtt", sanitized_file_stem));
+    
     // Check if translation file already exists
     if check_file_exists_and_valid(&output_path).await {
-        info!("Found existing translation file, skipping translation");
+        info!("Found existing translation file");
         return Ok(output_path);
     }
     
-    // Parse VTT file
+    // Send initial progress
     if let Some(sender) = &progress_sender {
         sender
             .send(TranslationProgress {
-                status: "Parsing VTT file".to_string(),
+                status: "Preparing translation".to_string(),
                 progress: 0.0,
             })
             .await
             .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
     }
     
+    // Parse VTT file
     let vtt_file = parse_vtt_file(vtt_path).await?;
-    debug!("Successfully parsed VTT file with {} segments", vtt_file.segments.len());
     
-    if vtt_file.segments.is_empty() {
-        return Err(anyhow!("No segments found in VTT file"));
-    }
-    
-    // Process in batches of 10 segments
-    const BATCH_SIZE: usize = 10;
-    let total_segments = vtt_file.segments.len();
-    let batch_count = (total_segments + BATCH_SIZE - 1) / BATCH_SIZE;
-    
-    info!("Starting translation in {} batches", batch_count);
-    
-    let mut translated_segments = Vec::new();
-    
-    for (batch_index, chunk) in vtt_file.segments.chunks(BATCH_SIZE).enumerate() {
-        if let Some(sender) = &progress_sender {
-            let progress = (batch_index as f32 / batch_count as f32) * 100.0;
-            sender
-                .send(TranslationProgress {
-                    status: format!("Translating segments ({}/{})", batch_index + 1, batch_count),
-                    progress,
-                })
-                .await
-                .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
-        }
-        
-        debug!("Translating batch {}/{}", batch_index + 1, batch_count);
-        let batch_translated = translate_segments(chunk, target_language_name, api_key).await?;
-        translated_segments.extend(batch_translated);
-        
-        // Small delay to avoid API rate limits
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    
-    // Write translated VTT to file
+    // Send progress update
     if let Some(sender) = &progress_sender {
         sender
             .send(TranslationProgress {
-                status: "Saving translated VTT file".to_string(),
-                progress: 95.0,
+                status: "Parsed VTT file".to_string(),
+                progress: 10.0,
             })
             .await
             .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
     }
     
-    let mut output_file = fs::File::create(&output_path).await?;
+    // Split segments into batches (max 30 segments per request to avoid token limits)
+    let batch_size = 30;
+    let mut translated_segments = Vec::new();
+    let total_segments = vtt_file.segments.len();
     
-    // Write header
-    output_file.write_all(vtt_file.header.as_bytes()).await?;
-    output_file.write_all(b"\n\n").await?;
-    
-    // Write translated segments
-    for segment in &translated_segments {
-        output_file.write_all(segment.timestamp.as_bytes()).await?;
-        output_file.write_all(b"\n").await?;
-        output_file.write_all(segment.text.as_bytes()).await?;
-        output_file.write_all(b"\n\n").await?;
+    for (batch_index, batch) in vtt_file.segments.chunks(batch_size).enumerate() {
+        let start_segment = batch_index * batch_size;
+        let end_segment = std::cmp::min(start_segment + batch_size, total_segments);
+        
+        // Send progress update
+        if let Some(sender) = &progress_sender {
+            sender
+                .send(TranslationProgress {
+                    status: format!("Translating segments {}-{} of {}", start_segment + 1, end_segment, total_segments),
+                    progress: 10.0 + (batch_index as f32 / (total_segments / batch_size) as f32) * 80.0,
+                })
+                .await
+                .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
+        }
+        
+        // Translate batch
+        let batch_translated = translate_segments(batch, target_language_name, api_key).await?;
+        translated_segments.extend(batch_translated);
+        
+        // Small delay to avoid rate limiting
+        tokio::time::sleep(Duration::from_millis(300)).await;
     }
     
-    info!("Translation complete. Saved to: {}", output_path.display());
-    
-    // Final progress update
+    // Send progress update
     if let Some(sender) = &progress_sender {
         sender
             .send(TranslationProgress {
-                status: "Translation complete".to_string(),
+                status: "Writing translated file".to_string(),
+                progress: 90.0,
+            })
+            .await
+            .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
+    }
+    
+    // Create translated VTT content
+    let mut translated_content = vtt_file.header.clone();
+    translated_content.push_str("\n\n");  // Add empty line after header
+    
+    for segment in &translated_segments {
+        translated_content.push_str(&format!("{}\n{}\n\n", segment.timestamp, segment.text));
+    }
+    
+    // Write translated content to file
+    let mut file = fs::File::create(&output_path).await?;
+    file.write_all(translated_content.as_bytes()).await?;
+    
+    // Send final progress
+    if let Some(sender) = &progress_sender {
+        sender
+            .send(TranslationProgress {
+                status: "Translation completed".to_string(),
                 progress: 100.0,
             })
             .await
             .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
     }
     
+    info!("Translation completed: {}", output_path.display());
     Ok(output_path)
 } 

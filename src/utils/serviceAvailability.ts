@@ -28,7 +28,7 @@ export async function checkServicesAvailability(isRetry: boolean = false): Promi
   try {
     // Вызываем Rust-функцию для проверки доступности сервисов
     const result = await invoke<ServiceAvailabilityResult>('check_services_availability', { 
-      is_retry: isRetry 
+      isRetry
     });
     
     // Просто возвращаем результат без показа диалоговых окон
@@ -65,6 +65,18 @@ export function setupServiceCheckListeners(callbacks: {
 }): Promise<() => Promise<void>> {
   // Массив функций для удаления слушателей
   const unlisteners: Promise<UnlistenFn>[] = [];
+  
+  // Слушаем событие запуска проверки из main.rs
+  unlisteners.push(listen('check-services-availability', (event) => {
+    const data = event.payload as { isRetry: boolean };
+    // Вызываем команду check_services_availability, когда получаем событие
+    // Это позволяет запустить проверку, когда main.rs отправляет событие
+    invoke<ServiceAvailabilityResult>('check_services_availability', { 
+      isRetry: data.isRetry || false 
+    }).catch(error => {
+      console.error('Ошибка при запуске проверки из события check-services-availability:', error);
+    });
+  }));
   
   // Слушаем событие начала проверки
   unlisteners.push(listen('services-check-started', (event) => {

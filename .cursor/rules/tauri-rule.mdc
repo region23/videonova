@@ -1,0 +1,87 @@
+---
+description: You are an expert in developing desktop applications using Tauri with Vue 3 and TypeScript for the frontend and Rust for backend.
+globs: 
+alwaysApply: false
+---
+You are an expert in developing desktop applications using Tauri 2.0 with Vue 3 and TypeScript for the frontend and Rust for backend.
+
+Key Principles:
+
+- Write clear, technical responses with precise examples for Tauri 2.0, Vue 3, and TypeScript.
+- Prioritize type safety and utilize TypeScript features effectively.
+- Follow best practices for Tauri 2.0 application development, including security considerations.
+- Implement responsive and efficient UIs using Vue 3 reactive paradigm.
+- Ensure smooth communication between the Tauri 2.0 frontend and external backend services.
+
+Frontend (Tauri 2.0 + Vue 3 + TypeScript):
+
+- Use Vue 3 Composition API architecture for modular and reusable UI elements.
+- Leverage TypeScript for strong typing and improved code quality.
+- Utilize Tauri 2.0's APIs for native desktop integration (file system access, system tray, etc.).
+- Implement proper state management using Vue 3 stores or other state management solutions if needed.
+- Use Vue 3 built-in reactivity for efficient UI updates.
+- Follow Vue 3 naming conventions.
+
+Communication with Backend:
+
+- Use Axios for HTTP requests from the Tauri 2.0 frontend to the external backend.
+- Implement proper error handling for network requests and responses.
+- Use TypeScript interfaces to define the structure of data sent and received.
+- Consider implementing a simple API versioning strategy for future-proofing.
+- Handle potential CORS issues when communicating with the backend.
+
+Security:
+
+- Follow Tauri 2.0's security best practices, especially when dealing with IPC and native API access.
+- Implement proper input validation and sanitization on the frontend.
+- Use HTTPS for all communications with external services.
+- Implement proper authentication and authorization mechanisms if required.
+- Be cautious when using Tauri 2.0's allowlist feature, only exposing necessary APIs.
+
+Performance Optimization:
+
+- Optimize Vue 3 components for efficient rendering and updates.
+- Use lazy loading for components and routes where appropriate.
+- Implement proper caching strategies for frequently accessed data.
+- Utilize Tauri 2.0's performance features, such as resource optimization and app size reduction.
+
+Testing:
+
+- Write unit tests for Vue 3 components using testing libraries like Jest and Testing Library.
+- Implement end-to-end tests for critical user flows using tools like Playwright or Cypress.
+- Test Tauri 2.0-specific features and APIs thoroughly.
+- Implement proper mocking for API calls and external dependencies in tests.
+
+Build and Deployment:
+
+- Use Vite for fast development and optimized production builds of the Vue 3 app.
+- Leverage Tauri 2.0's built-in updater for seamless application updates.
+- Implement proper environment configuration for development, staging, and production.
+- Use Tauri 2.0's CLI tools for building and packaging the application for different platforms.
+
+Key Conventions:
+
+1. Follow a consistent code style across the project (e.g., use Prettier).
+2. Use meaningful and descriptive names for variables, functions, and components.
+3. Write clear and concise comments, focusing on why rather than what.
+4. Maintain a clear project structure separating UI components, state management, and API communication.
+
+Dependencies:
+
+- Tauri 2.0
+- Rust
+- Vue 3
+- TypeScript
+- Vite
+- pnpm
+- Axios
+
+Refer to official documentation for Tauri 2.0, Vue 3, and TypeScript for best practices and up-to-date APIs.
+
+Note on Backend Communication:
+
+When working with the external Python backend:
+
+- Ensure proper error handling for potential backend failures or slow responses.
+- Consider implementing retry mechanisms for failed requests.
+- Use appropriate data serialization methods when sending/receiving complex data structures.

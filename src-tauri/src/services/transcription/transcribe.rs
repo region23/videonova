@@ -13,7 +13,6 @@ pub struct TranscriptionProgress {
     pub progress: f32,
 }
 
-// Добавляем атрибут #[allow(dead_code)] к неиспользуемым вариантам enum
 #[allow(dead_code)]
 pub enum ResponseFormat {
     Json,
@@ -57,7 +56,6 @@ impl MultipartFormBuilder {
         }
     }
 
-    // Добавляем атрибут #[allow(dead_code)] к неиспользуемой функции
     #[allow(dead_code)]
     fn with_boundary(boundary: &str) -> Self {
         Self {
@@ -117,7 +115,7 @@ pub async fn transcribe_audio(
     // Always use VTT format
     let format = ResponseFormat::Vtt;
     
-    // Расширение выходного файла зависит от формата ответа
+    // Output file extension depends on response format
     let file_extension = match format {
         ResponseFormat::Json => "json",
         ResponseFormat::Text => "txt",
@@ -132,13 +130,13 @@ pub async fn transcribe_audio(
         return Err(anyhow!("Failed to create output directory: {}", e));
     }
     
-    // Проверяем существование файла
+    // Check if file exists
     if !audio_path.exists() {
         error!("Audio file does not exist");
         return Err(anyhow!("Audio file does not exist"));
     }
     
-    // Проверяем права доступа к файлу
+    // Check file permissions
     let metadata = match std::fs::metadata(audio_path) {
         Ok(meta) => meta,
         Err(e) => {
@@ -158,7 +156,7 @@ pub async fn transcribe_audio(
         .ok_or_else(|| anyhow!("Failed to get file stem"))?
         .to_string_lossy();
     
-    // Обрабатываем имя файла - переводим в нижний регистр и заменяем пробелы на подчеркивания
+    // Process filename - convert to lowercase and replace spaces with underscores
     let sanitized_file_stem = sanitize_filename(&file_stem);
     let output_path = output_dir.join(format!("{}.{}", sanitized_file_stem, file_extension));
 
@@ -179,7 +177,7 @@ pub async fn transcribe_audio(
             .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
     }
 
-    // Читаем файл целиком в память
+    // Read entire file into memory
     let file_content = match tokio::fs::read(audio_path).await {
         Ok(content) => content,
         Err(e) => {
@@ -188,23 +186,23 @@ pub async fn transcribe_audio(
         }
     };
 
-    // Создаем multipart form-data с помощью builder'а
+    // Create multipart form-data using builder
     let mut form = MultipartFormBuilder::new();
     let filename = audio_path.file_name().unwrap().to_string_lossy();
     
-    // Добавляем все поля
+    // Add all fields
     form.add_text("model", "whisper-1")
         .add_text("response_format", &format.to_string());
 
-    // Добавляем язык если есть
+    // Add language if provided
     if let Some(lang) = &language {
         form.add_text("language", lang);
     }
 
-    // Добавляем файл
+    // Add file
     form.add_file("file", &filename, &file_content, "application/octet-stream");
 
-    // Получаем финальное тело запроса
+    // Get final request body
     let body = form.finish();
     
     // Send progress update - preparing the request
@@ -221,7 +219,7 @@ pub async fn transcribe_audio(
     // Create the client and request
     let client = reqwest::Client::new();
     
-    // Отправляем запрос
+    // Send request
     info!("Sending request to OpenAI Whisper API");
     
     let response_result = client
@@ -248,48 +246,34 @@ pub async fn transcribe_audio(
                     .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
             }
             
-            // Check if request was successful
-            if !status.is_success() {
+            if status.is_success() {
+                let text = response.text().await?;
+                
+                // Write transcription to file
+                let mut file = File::create(&output_path).await?;
+                file.write_all(text.as_bytes()).await?;
+                
+                // Send final progress
+                if let Some(sender) = &progress_sender {
+                    sender
+                        .send(TranscriptionProgress {
+                            status: "Transcription completed".to_string(),
+                            progress: 100.0,
+                        })
+                        .await
+                        .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
+                }
+                
+                Ok(output_path)
+            } else {
                 let error_text = response.text().await?;
-                error!("OpenAI API error: HTTP {}", status);
-                return Err(anyhow!("API request failed (HTTP {}): {}", status, error_text));
+                error!("OpenAI API error: {}", error_text);
+                Err(anyhow!("OpenAI API error: {}", error_text))
             }
-            
-            // Get response text
-            let content = response.text().await?;
-            
-            // Send progress update
-            if let Some(sender) = &progress_sender {
-                sender
-                    .send(TranscriptionProgress {
-                        status: "Saving transcription file".to_string(),
-                        progress: 95.0,
-                    })
-                    .await
-                    .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
-            }
-            
-            // Write content to file
-            let mut output_file = File::create(&output_path).await?;
-            output_file.write_all(content.as_bytes()).await?;
-            
-            // Send completion progress
-            if let Some(sender) = &progress_sender {
-                sender
-                    .send(TranscriptionProgress {
-                        status: "Transcription complete".to_string(),
-                        progress: 100.0,
-                    })
-                    .await
-                    .map_err(|e| anyhow!("Failed to send progress: {}", e))?;
-            }
-            
-            info!("Transcription completed successfully");
-            Ok(output_path)
-        },
-        Err(err) => {
-            error!("Failed to connect to OpenAI API: {}", err);
-            Err(anyhow!("Failed to connect to OpenAI API: {}", err))
+        }
+        Err(e) => {
+            error!("Failed to send request to OpenAI API: {}", e);
+            Err(anyhow!("Failed to send request to OpenAI API: {}", e))
         }
     }
 } 

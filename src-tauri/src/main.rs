@@ -2,22 +2,39 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use log::error;
-use tauri::menu::{MenuBuilder, SubmenuBuilder};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
+use tauri::Emitter;
 use tauri_plugin_store::StoreExt;
+use tauri::menu::{MenuBuilder, SubmenuBuilder};
+use tauri_plugin_clipboard_manager;
+use tauri_plugin_dialog;
+use tauri_plugin_opener;
+use tauri_plugin_shell;
+use tauri_plugin_store;
 
+// Модули приложения
 mod commands;
 mod utils;
+mod config;
+mod services;
+mod models;
+#[path = "errors/mod.rs"]
+mod errors;
+mod events;
+
+// Импорты для команд
+use crate::commands::*;
 
 fn main() {
-    // Инициализируем логгер с тонкой настройкой
-    utils::logger::init_logger();
+    // Инициализируем логгер
+    env_logger::init();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             // Create app submenu
             let app_menu = SubmenuBuilder::new(app, "App")
@@ -34,77 +51,77 @@ fn main() {
                 .paste()
                 .select_all()
                 .build()?;
+                
             // Create main menu
             let menu = MenuBuilder::new(app).items(&[&app_menu, &edit_menu]).build()?;
 
             app.set_menu(menu)?;
 
             // Initialize store
-            let _store = app.store(".settings.dat")?;
+            let _store = app.get_store(".settings.dat").ok_or_else(|| {
+                error!("Failed to initialize store");
+                Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to initialize store"))
+            })?;
 
-            // Initialize tools in background
-            tauri::async_runtime::spawn(async {
-                if let Err(e) = utils::tools::init_tools(None).await {
-                    error!("Failed to initialize tools: {}", e);
-                }
-            });
-            
-            // Проверка доступности сервисов при запуске приложения
             if let Some(main_window) = app.get_webview_window("main") {
-                // Клонируем окно для использования в асинхронном контексте
-                let window_clone = main_window.clone();
-                
-                tauri::async_runtime::spawn(async move {
-                    // Небольшая задержка перед проверкой, чтобы приложение успело загрузиться
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                    
-                    // Проверяем доступность сервисов
-                    match commands::check_services_availability(window_clone, None).await {
-                        Ok(result) => {
-                            if result.vpn_required {
-                                log::warn!("VPN required: YouTube available: {}, OpenAI available: {}", 
-                                          result.youtube_available, 
-                                          result.openai_available);
-                            } else {
-                                log::info!("All services are available");
-                            }
-                        },
-                        Err(e) => {
-                            log::error!("Failed to check services availability: {}", e);
-                        }
-                    }
-                });
-            } else {
-                log::error!("Main window not found");
+                let _ = main_window.show();
             }
 
             Ok(())
         })
         .on_menu_event(|app_handle, event| {
-            let window = app_handle.get_webview_window("main").unwrap();
-            match event.id().0.as_str() {
-                "settings" => {
-                    // Emit event to show settings
-                    window.emit("show-settings", ()).unwrap();
+            if let Some(window) = app_handle.get_webview_window("main") {
+                match event.id().0.as_str() {
+                    "settings" => {
+                        // Emit event to show settings
+                        let _ = window.emit("show-settings", ());
+                    },
+                    "quit" => {
+                        std::process::exit(0);
+                    },
+                    _ => {}
                 }
+            }
+        })
+        .on_window_event(|_app_handle, event| {
+            match event {
+                tauri::WindowEvent::Destroyed { .. } => {
+                    std::process::exit(0);
+                },
                 _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
-            commands::get_video_info,
-            commands::download_video,
-            commands::validate_openai_key,
-            commands::transcribe_audio,
-            commands::translate_vtt,
-            commands::generate_speech,
-            commands::process_video,
-            commands::check_file_exists_command,
-            commands::cleanup_temp_files,
-            commands::open_file,
-            commands::check_services_availability,
-            commands::check_youtube_availability,
-            commands::check_openai_availability,
+            // TTS commands
+            get_tts_config,
+            save_tts_config,
+            get_tts_engines,
+            get_default_tts_engine,
+            // Используем полное имя вместо двух одинаковых имен команд
+            tts_commands::generate_speech,
+            // Video commands
+            get_video_info,
+            download_video,
+            // Transcription commands
+            transcribe_audio,
+            validate_openai_key,
+            // Translation commands
+            translate_vtt,
+            // Utility commands
+            check_file_exists_command,
+            cleanup_temp_files,
+            check_services_availability,
+            check_fish_speech_installed,
+            // Speech commands
+            speech_commands::generate_speech_v2,
+            speech_commands::process_video,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app_handle, event| {
+            match event {
+                // Add event handling if needed
+                _ => {}
+            }
+        });
 }

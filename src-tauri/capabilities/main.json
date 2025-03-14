@@ -20,7 +20,9 @@
     "dialog:allow-open",
     "dialog:allow-save",
     "store:default",
-    "store:default",
-    "clipboard-manager:default"
+    "clipboard-manager:default",
+    "shell:default",
+    "shell:allow-open",
+    "opener:default"
   ]
 }

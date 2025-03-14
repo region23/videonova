@@ -1,54 +1,60 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "identifier": "com.videonova.app",
-  "productName": "Videonova",
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "productName": "VideoNova",
   "version": "0.1.0",
+  "identifier": "com.videonova.dev",
   "build": {
-    "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build",
-    "devUrl": "http://localhost:1420",
-    "frontendDist": "../dist"
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173"
   },
   "app": {
     "security": {
-      "csp": null,
-      "capabilities": [
-        {
-          "identifier": "main-capability",
-          "windows": ["*"],
-          "permissions": [
-            "core:path:default",
-            "core:event:default",
-            "core:window:default",
-            "core:app:default",
-            "core:resources:default",
-            "core:menu:default",
-            "core:tray:default",
-            "dialog:default",
-            "opener:default",
-            "opener:allow-reveal-item-in-dir",
-            "store:default"
-          ]
-        }
-      ]
+      "csp": null
     },
     "windows": [
       {
-        "title": "Videonova",
-        "width": 1200,
-        "height": 447
+        "fullscreen": false,
+        "height": 800,
+        "resizable": true,
+        "title": "VideoNova",
+        "width": 1200
       }
     ]
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "category": "DeveloperTool",
+    "copyright": "",
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    },
+    "externalBin": [],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "longDescription": "",
+    "macOS": {
+      "entitlements": null,
+      "exceptionDomain": "",
+      "frameworks": [],
+      "providerShortName": null,
+      "signingIdentity": null
+    },
+    "resources": [],
+    "shortDescription": "",
+    "targets": "all",
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    }
   }
 } 

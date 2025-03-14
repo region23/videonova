@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onErrorCaptured } from 'vue'
 import MainLayout from './components/MainLayout.vue'
-import ApiKeyInput from './components/ApiKeyInput.vue'
+import SettingsInput from './components/SettingsInput.vue'
 import { load } from '@tauri-apps/plugin-store'
 
 const hasApiKey = ref(false)
@@ -65,7 +65,7 @@ onMounted(() => {
   }, 0);
 })
 
-const handleApiKeySet = () => {
+const handleSettingsSaved = () => {
   hasApiKey.value = true
 }
 
@@ -99,7 +99,7 @@ const retryInitialization = () => {
     
     <!-- App content -->
     <div v-else>
-      <ApiKeyInput v-if="!hasApiKey" @apiKeySet="handleApiKeySet" />
+      <SettingsInput v-if="!hasApiKey" mode="setup" @settingsSaved="handleSettingsSaved" />
       <MainLayout v-else />
     </div>
   </div>

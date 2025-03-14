@@ -76,6 +76,9 @@ let cleanupListeners: (() => Promise<void>) | null = null;
 let checkTimeoutId: number | null = null;
 let hideTimeoutId: number | null = null;
 
+// Таймаут, после которого запустить проверку самостоятельно, если не получен результат от бэкенда
+let autoCheckTimeoutId: number | null = null;
+
 // Добавим наблюдатель за результатом проверки
 watch(checkResult, (newResult) => {
   if (newResult) {
@@ -184,6 +187,12 @@ onMounted(() => {
         onCheckStarted: (isRetry) => {
           console.log(`Начата ${isRetry ? 'повторная' : 'первичная'} проверка сервисов (от слушателя событий)`);
           isChecking.value = true;
+          
+          // Если проверка запущена, отменяем запланированный таймаут на авто-проверку
+          if (autoCheckTimeoutId) {
+            clearTimeout(autoCheckTimeoutId);
+            autoCheckTimeoutId = null;
+          }
         },
         onYouTubeResult: (available) => {
           console.log(`YouTube доступен: ${available}`);
@@ -212,6 +221,12 @@ onMounted(() => {
             // Обновляем результат проверки
             checkResult.value = result as ServiceAvailabilityResult;
             initialCheckDone.value = true;
+            
+            // Если получен результат, отменяем запланированный таймаут на авто-проверку
+            if (autoCheckTimeoutId) {
+              clearTimeout(autoCheckTimeoutId);
+              autoCheckTimeoutId = null;
+            }
           } else {
             // Handle case where result doesn't match expected structure
             console.error('Unexpected result format from service check:', result);
@@ -227,7 +242,14 @@ onMounted(() => {
         }
       });
       
-      // НЕ запускаем проверку здесь, так как она уже запускается из main.rs
+      // Установка таймаута для самостоятельного запуска проверки, если она не была запущена из main.rs
+      autoCheckTimeoutId = window.setTimeout(() => {
+        if (!initialCheckDone.value && !isChecking.value) {
+          console.log('Автоматическая проверка не запустилась в течение 5 секунд, запускаем вручную');
+          triggerCheckServices(false);
+        }
+      }, 5000); // 5 секунд ожидания, после чего запускаем проверку вручную
+      
       console.log('Ожидаем результаты от автоматической проверки...');
     } catch (err) {
       console.error('Ошибка при установке слушателей:', err);
@@ -250,6 +272,12 @@ onUnmounted(() => {
   if (hideTimeoutId) {
     clearTimeout(hideTimeoutId);
     hideTimeoutId = null;
+  }
+  
+  // Очищаем таймаут авто-проверки, если он установлен
+  if (autoCheckTimeoutId) {
+    clearTimeout(autoCheckTimeoutId);
+    autoCheckTimeoutId = null;
   }
   
   // Очищаем слушателей неблокирующим образом

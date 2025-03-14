@@ -1,72 +1,60 @@
 [package]
 name = "videonova"
 version = "0.1.0"
-description = "Translate your favorite YouTube videos into any language with AI-powered voice translation"
-authors = ["@region23"]
-edition = "2024"
+description = "Video translation app"
+authors = ["Pavel Pavlenko"]
+license = ""
+repository = ""
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]
-tauri-build = { version = "2.0.6", features = [] }
+tauri-build = { version = "2.0", features = [] }
+cc = "1.0"
 
 [dependencies]
-tauri = { version = "2.3.1", features = [] }
-tauri-plugin-opener = "2.2"
-tauri-plugin-dialog = "2.2"
-tauri-plugin-store = "2"
+# Tauri and UI
+tauri = { version = "2.0", features = [] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.43", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"] }
-tokio-stream = "0.1"
+
+# Async runtime and networking
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = "0.7"
 futures = "0.3"
-reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
-anyhow = "1.0"
-log = "0.4"
-env_logger = "0.11"
-semver = "1.0"
-once_cell = "1.20"
-regex = "1.11"
-tempfile = "3.17"
-zip = "2.2"
-walkdir = "2.5"
-tauri-plugin-devtools = "2.0.0"
-tauri-plugin-clipboard-manager = "2"
-which = "6.0"
-thiserror = "1.0"
-lazy_static = "1.4"
-
-# Работа с файлами и путями
-path-clean = "1.0"
-
-# Обработка аудио
-symphonia = { version = "0.5", features = ["mp3", "aac", "wav", "pcm"] }
-rubato = "0.14"
-dasp = { version = "0.11", features = ["signal", "interpolate", "window"] }
-webrtc-vad = "0.4"
-hound = "3.5"
-
-# Связь с нативными библиотеками через FFI
-[dependencies.libc]
-version = "0.2"
-
-# Многопоточность и параллелизм
-rayon = "1.7"
+reqwest = { version = "0.11", features = ["json"] }
 async-trait = "0.1"
 
-# Утилиты
-md5 = "0.7"
-rand = "0.8"
-bytes = "1.4"
-uuid = { version = "1.3", features = ["v4"] }
-
-# Время и даты
+# Utilities
+once_cell = "1.8"
+regex = "1.5"
+semver = "1.0"
+walkdir = "2.3"
+zip = "0.6"
+uuid = { version = "1.3", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
-# TTS library - removed since we're using our own implementation
+# Logging
+log = "0.4"
+env_logger = "0.10"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Tauri plugins
+tauri-plugin-store = { version = "2.0" }
+tauri-plugin-clipboard-manager = { version = "2.0" }
+tauri-plugin-dialog = { version = "2.0" }
+tauri-plugin-opener = { version = "2.0" }
+tauri-plugin-shell = { version = "2.0" }
 
 [dev-dependencies]
-criterion = "0.5"
 tokio-test = "0.4"
+mockall = "0.11"
 
 [features]
+# this feature is used for production builds or when `devPath` points to the filesystem
+# DO NOT REMOVE!!
 custom-protocol = ["tauri/custom-protocol"] 
