@@ -269,6 +269,8 @@ const handleProcessClick = async () => {
         outputPath: selectedPath.value,
         targetLanguage: selectedLanguages.value.target.code,
         targetLanguageName: selectedLanguages.value.target.name,
+        sourceLanguageCode: selectedLanguages.value.source.code,
+        sourceLanguageName: selectedLanguages.value.source.name,
         apiKey: apiKey,
         voice: 'nova',
         model: 'tts-1',
