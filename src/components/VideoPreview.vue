@@ -201,6 +201,9 @@ watch(() => props.isLoading, (newVal) => {
 watch(() => props.youtubeUrl, (newUrl, oldUrl) => {
   console.log('YouTube URL prop changed:', { newUrl, oldUrl, previousUrl: previousUrl.value });
   
+  // Reset all completion states first
+  resetStates();
+  
   // Если URL пустой или удален, сразу отправляем событие о неготовности видео
   if (!newUrl || newUrl.trim() === '') {
     console.log('Empty URL detected, video info is not ready');
@@ -212,7 +215,6 @@ watch(() => props.youtubeUrl, (newUrl, oldUrl) => {
     // If we have a new YouTube URL and it's different from the previous one
     if (!previousUrl.value || !newUrl.includes(previousUrl.value)) {
       console.log('YouTube URL prop changed, setting loading state');
-      resetState(); // Reset state first
       internalIsLoading.value = true;
       emit('loading-state-change', true);
       // Video is not ready while loading
@@ -1289,6 +1291,25 @@ const isServiceCheckVisible = computed(() =>
 const handleServiceCheckHidden = () => {
   console.log('Service check has been hidden')
   serviceCheckManuallyHidden.value = true
+}
+
+// Add resetStates method after other methods
+const resetStates = () => {
+  translationComplete.value = false;
+  downloadStepComplete.value = false;
+  transcriptionStepComplete.value = false;
+  translationStepComplete.value = false;
+  ttsStepComplete.value = false;
+  mergeStepComplete.value = false;
+  isDownloadComplete.value = false;
+  outputDirectory.value = null;
+  mergeError.value = null;
+  audioProgress.value = null;
+  videoProgress.value = null;
+  transcriptionProgress.value = null;
+  translationProgress.value = null;
+  ttsProgress.value = null;
+  mergeProgress.value = null;
 }
 </script>
 

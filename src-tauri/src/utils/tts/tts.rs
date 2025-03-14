@@ -338,8 +338,11 @@ pub mod vtt {
                 let start = parse_time(times[0])?;
                 let end = parse_time(times[2])?;
                 // Оставшиеся строки считаем текстом реплики
-                let text = lines.collect::<Vec<_>>().join(" ");
-                cues.push(SubtitleCue { start, end, text });
+                let text = lines.collect::<Vec<_>>().join(" ").trim().to_string();
+                // Пропускаем пустые субтитры
+                if !text.is_empty() {
+                    cues.push(SubtitleCue { start, end, text });
+                }
             }
         }
         Ok(cues)
@@ -375,10 +378,14 @@ pub mod tts {
     use reqwest::Client;
     use serde_json::json;
     use log::{debug, info, warn, error};
+    use tokio::time::{sleep, Duration};
 
     /// Генерирует аудиофрагмент через TTS API для заданного текста.
     /// Возвращает Vec<u8> с данными аудио (например, MP3) и текст для отладки.
     pub async fn generate_tts(api_key: &str, text: &str, config: &TtsConfig) -> Result<(Vec<u8>, String)> {
+        const MAX_RETRIES: u32 = 5;
+        const INITIAL_BACKOFF_MS: u64 = 1000;
+
         let payload = json!({
             "model": config.model,
             "voice": config.voice,
@@ -388,43 +395,80 @@ pub mod tts {
         });
 
         let client = Client::new();
-        let resp = client
-            .post("https://api.openai.com/v1/audio/speech")
-            .bearer_auth(api_key)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| TtsError::HttpError(e))?;
-            
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let error_text = resp.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
-            return Err(TtsError::OpenAiApiError(format!(
-                "Ошибка API (код {}): {}", status, error_text
-            )));
-        }
-        
-        let audio_bytes = resp.bytes().await
-            .map_err(|e| TtsError::HttpError(e))?;
-            
-        info!("Получено {} байт аудио от OpenAI для текста: {}", audio_bytes.len(), text);
-        
-        if audio_bytes.is_empty() {
-            warn!("Получен пустой ответ от OpenAI TTS API для текста: {}", text);
-            return Err(TtsError::OpenAiApiError("Получен пустой ответ от API".to_string()));
-        }
-        
-        // Проверяем, что первые байты похожи на MP3 (ID3 или MPEG заголовок)
-        if audio_bytes.len() > 2 {
-            let is_id3 = audio_bytes.len() > 3 && &audio_bytes[0..3] == b"ID3";
-            let is_mpeg = audio_bytes.len() > 2 && (audio_bytes[0] == 0xFF && (audio_bytes[1] & 0xE0) == 0xE0);
-            
-            if !is_id3 && !is_mpeg {
-                warn!("Получены данные, не похожие на MP3 (нет ID3/MPEG заголовка) для текста: {}", text);
+        let mut attempt = 0;
+        let mut last_error = None;
+
+        while attempt < MAX_RETRIES {
+            if attempt > 0 {
+                let backoff = INITIAL_BACKOFF_MS * (2_u64.pow(attempt - 1));
+                info!("Повторная попытка #{} через {} мс...", attempt + 1, backoff);
+                sleep(Duration::from_millis(backoff)).await;
+            }
+
+            let resp = match client
+                .post("https://api.openai.com/v1/audio/speech")
+                .bearer_auth(api_key)
+                .json(&payload)
+                .send()
+                .await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!("Ошибка сети при попытке #{}: {}", attempt + 1, e);
+                        last_error = Some(TtsError::HttpError(e));
+                        attempt += 1;
+                        continue;
+                    }
+                };
+
+            if resp.status().is_success() {
+                let audio_bytes = resp.bytes().await
+                    .map_err(|e| TtsError::HttpError(e))?;
+                    
+                info!("Получено {} байт аудио от OpenAI для текста: {}", audio_bytes.len(), text);
+                
+                if audio_bytes.is_empty() {
+                    warn!("Получен пустой ответ от OpenAI TTS API для текста: {}", text);
+                    last_error = Some(TtsError::OpenAiApiError("Получен пустой ответ от API".to_string()));
+                    attempt += 1;
+                    continue;
+                }
+                
+                // Проверяем, что первые байты похожи на MP3
+                if audio_bytes.len() > 2 {
+                    let is_id3 = audio_bytes.len() > 3 && &audio_bytes[0..3] == b"ID3";
+                    let is_mpeg = audio_bytes.len() > 2 && (audio_bytes[0] == 0xFF && (audio_bytes[1] & 0xE0) == 0xE0);
+                    
+                    if !is_id3 && !is_mpeg {
+                        warn!("Получены данные, не похожие на MP3 (нет ID3/MPEG заголовка) для текста: {}", text);
+                    }
+                }
+                
+                return Ok((audio_bytes.to_vec(), text.to_string()));
+            } else {
+                let status = resp.status();
+                let error_text = resp.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
+                
+                // Для 503 ошибок всегда делаем повторную попытку
+                if status == 503 {
+                    warn!("Сервер перегружен (503), попытка #{}: {}", attempt + 1, error_text);
+                    last_error = Some(TtsError::OpenAiApiError(format!(
+                        "Ошибка API (код {}): {}", status, error_text
+                    )));
+                    attempt += 1;
+                    continue;
+                }
+                
+                // Для других ошибок возвращаем сразу
+                return Err(TtsError::OpenAiApiError(format!(
+                    "Ошибка API (код {}): {}", status, error_text
+                )));
             }
         }
-        
-        Ok((audio_bytes.to_vec(), text.to_string()))
+
+        // Если все попытки исчерпаны, возвращаем последнюю ошибку
+        Err(last_error.unwrap_or_else(|| TtsError::OpenAiApiError(
+            "Превышено максимальное количество попыток".to_string()
+        )))
     }
 }
 
