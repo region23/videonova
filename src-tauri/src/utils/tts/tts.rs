@@ -282,7 +282,7 @@ impl Default for TtsConfig {
     fn default() -> Self {
         Self {
             model: "tts-1-hd".to_string(),
-            voice: "onyx".to_string(),  // Всегда используем мужской голос
+            voice: "ash".to_string(),  // Всегда используем мужской голос
             speed: 1.0,
         }
     }

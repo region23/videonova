@@ -272,7 +272,7 @@ const handleProcessClick = async () => {
         sourceLanguageCode: selectedLanguages.value.source.code,
         sourceLanguageName: selectedLanguages.value.source.name,
         apiKey: apiKey,
-        voice: 'nova',
+        voice: 'ash',
         model: 'tts-1',
         wordsPerSecond: 3.0
         // The backend will use sanitize_filename on the video title

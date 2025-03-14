@@ -263,6 +263,10 @@ pub async fn translate_vtt(
     // Create output directory if it doesn't exist
     fs::create_dir_all(output_dir).await?;
     
+    // Create temp directory
+    let temp_dir = output_dir.join("videonova_temp");
+    fs::create_dir_all(&temp_dir).await?;
+    
     // Create output file path with language suffix
     let file_stem = vtt_path
         .file_stem()
@@ -270,7 +274,7 @@ pub async fn translate_vtt(
         .to_string_lossy();
     
     let sanitized_file_stem = sanitize_filename(&file_stem);
-    let output_path = output_dir.join(format!("{}_{}.vtt", sanitized_file_stem, target_language_code));
+    let output_path = temp_dir.join(format!("{}_{}.vtt", sanitized_file_stem, target_language_code));
     debug!("Output will be saved to: {}", output_path.display());
 
     // Check if translation file already exists

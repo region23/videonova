@@ -734,12 +734,19 @@ async function setupEventListeners() {
       mergeProgress.value = null;
       ttsProgress.value = null;
 
-      // Clean up temporary files and move final video
+      // Clean up temporary files
       try {
-        await invoke('cleanup_temp_files', {
-          final_video_path: finalVideoPath.value,
-          output_dir: outputDirectory.value
-        });
+        if (finalVideoPath.value && outputDirectory.value) {
+          await invoke('cleanup_temp_files', {
+            finalVideoPath: finalVideoPath.value,
+            outputDir: outputDirectory.value
+          });
+        } else {
+          console.warn('Missing required paths for cleanup:', {
+            finalVideoPath: finalVideoPath.value,
+            outputDirectory: outputDirectory.value
+          });
+        }
       } catch (error) {
         console.error('Error during cleanup:', error);
       }

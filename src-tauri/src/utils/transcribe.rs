@@ -132,6 +132,13 @@ pub async fn transcribe_audio(
         return Err(anyhow!("Failed to create output directory: {}", e));
     }
     
+    // Create temp directory
+    let temp_dir = output_dir.join("videonova_temp");
+    if let Err(e) = fs::create_dir_all(&temp_dir).await {
+        error!("Failed to create temp directory: {}", e);
+        return Err(anyhow!("Failed to create temp directory: {}", e));
+    }
+    
     // Проверяем существование файла
     if !audio_path.exists() {
         error!("Audio file does not exist");
@@ -160,7 +167,7 @@ pub async fn transcribe_audio(
     
     // Обрабатываем имя файла - переводим в нижний регистр и заменяем пробелы на подчеркивания
     let sanitized_file_stem = sanitize_filename(&file_stem);
-    let output_path = output_dir.join(format!("{}.{}", sanitized_file_stem, file_extension));
+    let output_path = temp_dir.join(format!("{}.{}", sanitized_file_stem, file_extension));
 
     // Check if transcription file already exists
     if check_file_exists_and_valid(&output_path).await {
