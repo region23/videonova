@@ -182,15 +182,22 @@ pub async fn download_video(
         tokio::fs::create_dir_all(output_dir).await?;
     }
     
+    // Create temp directory
+    let temp_dir = output_dir.join("videonova_temp");
+    if !temp_dir.exists() {
+        info!("Creating temp directory: {}", temp_dir.display());
+        tokio::fs::create_dir_all(&temp_dir).await?;
+    }
+    
     // Get video info first to get the title
     info!("Fetching video information...");
     let video_info = get_video_info(url, window).await?;
     let safe_title = sanitize_filename(&video_info.title);
     info!("Video title: {}", safe_title);
 
-    // Check if files already exist
-    let video_path = output_dir.join(format!("{}_video.mp4", safe_title));
-    let audio_path = output_dir.join(format!("{}_audio.m4a", safe_title));
+    // Check if files already exist in temp directory
+    let video_path = temp_dir.join(format!("{}_video.mp4", safe_title));
+    let audio_path = temp_dir.join(format!("{}_audio.m4a", safe_title));
 
     if check_file_exists_and_valid(&video_path).await && check_file_exists_and_valid(&audio_path).await {
         info!("Found existing video and audio files, skipping download");
@@ -216,10 +223,6 @@ pub async fn download_video(
     let ytdlp_path = get_tool_path("yt-dlp").ok_or_else(|| anyhow!("yt-dlp not found"))?;
     debug!("Using yt-dlp from: {}", ytdlp_path.display());
 
-    // Create output directory if it doesn't exist
-    tokio::fs::create_dir_all(output_dir).await?;
-    debug!("Ensured output directory exists");
-
     // Store child processes for cleanup
     let child_processes = Arc::new(Mutex::new(Vec::new()));
     let child_processes_clone = child_processes.clone();
@@ -229,8 +232,8 @@ pub async fn download_video(
     let audio_filename = format!("{}_audio.m4a", safe_title);
     let video_filename = format!("{}_video.mp4", safe_title);
     
-    let audio_template = output_dir.join(format!("{}_audio.%(ext)s", safe_title));
-    let video_template = output_dir.join(format!("{}_video.%(ext)s", safe_title));
+    let audio_template = temp_dir.join(format!("{}_audio.%(ext)s", safe_title));
+    let video_template = temp_dir.join(format!("{}_video.%(ext)s", safe_title));
     
     debug!("Audio template: {}", audio_template.display());
     debug!("Video template: {}", video_template.display());

@@ -3,6 +3,8 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { listen, emit } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 import { Store as TauriStore } from '@tauri-apps/plugin-store'
+import { findLanguageByCode } from '../utils/languages'
+import { Window } from '@tauri-apps/api/window'
 import YouTubeInput from './YouTubeInput.vue'
 import LanguageSelector from './LanguageSelector.vue'
 import VideoPreview from './VideoPreview.vue'
@@ -269,8 +271,10 @@ const handleProcessClick = async () => {
         outputPath: selectedPath.value,
         targetLanguage: selectedLanguages.value.target.code,
         targetLanguageName: selectedLanguages.value.target.name,
+        sourceLanguageCode: selectedLanguages.value.source.code,
+        sourceLanguageName: selectedLanguages.value.source.name,
         apiKey: apiKey,
-        voice: 'nova',
+        voice: 'ash',
         model: 'tts-1',
         wordsPerSecond: 3.0
         // The backend will use sanitize_filename on the video title
@@ -316,6 +320,11 @@ const handleMergeComplete = () => {
   translationProgress.value = null
   ttsProgress.value = null
   mergeProgress.value = null
+  
+  // Clear video info and input field
+  handleClearVideoInfo()
+  const appWindow = new Window('main')
+  appWindow.emit('clear-video-info')
 }
 
 const handleVideoInfoReadyStateChange = (isReady: boolean) => {
@@ -329,9 +338,27 @@ const handleVideoInfoReadyStateChange = (isReady: boolean) => {
 }
 
 const handleClearVideoInfo = () => {
+  // Reset video info and URL
   videoInfo.value = null;
   currentUrl.value = '';
   isVideoInfoReady.value = false;
+  
+  // Reset language detection
+  isSourceLanguageDetected.value = false;
+  
+  // Reset all processing results
+  downloadResult.value = null;
+  transcriptionResult.value = null;
+  translationResult.value = null;
+  
+  // Reset all progress states
+  transcriptionProgress.value = null;
+  translationProgress.value = null;
+  ttsProgress.value = null;
+  mergeProgress.value = null;
+  
+  // Reset error state
+  error.value = '';
 }
 </script>
 
@@ -408,6 +435,7 @@ const handleClearVideoInfo = () => {
           <div class="content-card info-content">
             <VideoPreview 
               :video-info="videoInfo"
+              :youtube-url="videoInfo?.url || ''"
               @merge-complete="handleMergeComplete"
               @video-info-ready-state-change="handleVideoInfoReadyStateChange"
               :transcription-progress="transcriptionProgress"

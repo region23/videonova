@@ -337,7 +337,7 @@ const startTTS = async (translatedVttPath: string) => {
       translatedVttPath: translatedVttPath,
       outputPath: selectedPath.value,
       apiKey,
-      voice: 'alloy',
+      voice: 'ash',
       model: 'tts-1',
       wordsPerSecond: 3.0
     })
@@ -349,7 +349,7 @@ const startTTS = async (translatedVttPath: string) => {
       translatedVttPath: translatedVttPath,
       outputPath: selectedPath.value,
       apiKey,
-      voice: 'alloy',
+      voice: 'ash',
       model: 'tts-1',
       wordsPerSecond: 3.0
     })

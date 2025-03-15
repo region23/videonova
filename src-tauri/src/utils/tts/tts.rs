@@ -282,7 +282,7 @@ impl Default for TtsConfig {
     fn default() -> Self {
         Self {
             model: "tts-1-hd".to_string(),
-            voice: "onyx".to_string(),  // Всегда используем мужской голос
+            voice: "ash".to_string(),  // Всегда используем мужской голос
             speed: 1.0,
         }
     }
@@ -300,6 +300,8 @@ pub struct AudioProcessingConfig {
     /// Баланс между голосом и инструментальной дорожкой (0.0 - 1.0)
     /// 0.5 означает равный баланс
     pub voice_to_instrumental_ratio: f32,
+    /// Коэффициент усиления инструментальной дорожки (1.0 = без изменений)
+    pub instrumental_boost: f32,
 }
 
 impl Default for AudioProcessingConfig {
@@ -308,7 +310,8 @@ impl Default for AudioProcessingConfig {
             window_size: 512,
             hop_size: 256,
             target_peak_level: 0.8,
-            voice_to_instrumental_ratio: 0.5, // Равный баланс между голосом и музыкой
+            voice_to_instrumental_ratio: 0.4, // Баланс: 40% голос, 60% музыка
+            instrumental_boost: 1.5, // Усиление инструментальной дорожки в 1.5 раза
         }
     }
 }
@@ -335,8 +338,11 @@ pub mod vtt {
                 let start = parse_time(times[0])?;
                 let end = parse_time(times[2])?;
                 // Оставшиеся строки считаем текстом реплики
-                let text = lines.collect::<Vec<_>>().join(" ");
-                cues.push(SubtitleCue { start, end, text });
+                let text = lines.collect::<Vec<_>>().join(" ").trim().to_string();
+                // Пропускаем пустые субтитры
+                if !text.is_empty() {
+                    cues.push(SubtitleCue { start, end, text });
+                }
             }
         }
         Ok(cues)
@@ -372,10 +378,14 @@ pub mod tts {
     use reqwest::Client;
     use serde_json::json;
     use log::{debug, info, warn, error};
+    use tokio::time::{sleep, Duration};
 
     /// Генерирует аудиофрагмент через TTS API для заданного текста.
     /// Возвращает Vec<u8> с данными аудио (например, MP3) и текст для отладки.
     pub async fn generate_tts(api_key: &str, text: &str, config: &TtsConfig) -> Result<(Vec<u8>, String)> {
+        const MAX_RETRIES: u32 = 5;
+        const INITIAL_BACKOFF_MS: u64 = 1000;
+
         let payload = json!({
             "model": config.model,
             "voice": config.voice,
@@ -385,43 +395,80 @@ pub mod tts {
         });
 
         let client = Client::new();
-        let resp = client
-            .post("https://api.openai.com/v1/audio/speech")
-            .bearer_auth(api_key)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| TtsError::HttpError(e))?;
-            
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let error_text = resp.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
-            return Err(TtsError::OpenAiApiError(format!(
-                "Ошибка API (код {}): {}", status, error_text
-            )));
-        }
-        
-        let audio_bytes = resp.bytes().await
-            .map_err(|e| TtsError::HttpError(e))?;
-            
-        info!("Получено {} байт аудио от OpenAI для текста: {}", audio_bytes.len(), text);
-        
-        if audio_bytes.is_empty() {
-            warn!("Получен пустой ответ от OpenAI TTS API для текста: {}", text);
-            return Err(TtsError::OpenAiApiError("Получен пустой ответ от API".to_string()));
-        }
-        
-        // Проверяем, что первые байты похожи на MP3 (ID3 или MPEG заголовок)
-        if audio_bytes.len() > 2 {
-            let is_id3 = audio_bytes.len() > 3 && &audio_bytes[0..3] == b"ID3";
-            let is_mpeg = audio_bytes.len() > 2 && (audio_bytes[0] == 0xFF && (audio_bytes[1] & 0xE0) == 0xE0);
-            
-            if !is_id3 && !is_mpeg {
-                warn!("Получены данные, не похожие на MP3 (нет ID3/MPEG заголовка) для текста: {}", text);
+        let mut attempt = 0;
+        let mut last_error = None;
+
+        while attempt < MAX_RETRIES {
+            if attempt > 0 {
+                let backoff = INITIAL_BACKOFF_MS * (2_u64.pow(attempt - 1));
+                info!("Повторная попытка #{} через {} мс...", attempt + 1, backoff);
+                sleep(Duration::from_millis(backoff)).await;
+            }
+
+            let resp = match client
+                .post("https://api.openai.com/v1/audio/speech")
+                .bearer_auth(api_key)
+                .json(&payload)
+                .send()
+                .await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!("Ошибка сети при попытке #{}: {}", attempt + 1, e);
+                        last_error = Some(TtsError::HttpError(e));
+                        attempt += 1;
+                        continue;
+                    }
+                };
+
+            if resp.status().is_success() {
+                let audio_bytes = resp.bytes().await
+                    .map_err(|e| TtsError::HttpError(e))?;
+                    
+                info!("Получено {} байт аудио от OpenAI для текста: {}", audio_bytes.len(), text);
+                
+                if audio_bytes.is_empty() {
+                    warn!("Получен пустой ответ от OpenAI TTS API для текста: {}", text);
+                    last_error = Some(TtsError::OpenAiApiError("Получен пустой ответ от API".to_string()));
+                    attempt += 1;
+                    continue;
+                }
+                
+                // Проверяем, что первые байты похожи на MP3
+                if audio_bytes.len() > 2 {
+                    let is_id3 = audio_bytes.len() > 3 && &audio_bytes[0..3] == b"ID3";
+                    let is_mpeg = audio_bytes.len() > 2 && (audio_bytes[0] == 0xFF && (audio_bytes[1] & 0xE0) == 0xE0);
+                    
+                    if !is_id3 && !is_mpeg {
+                        warn!("Получены данные, не похожие на MP3 (нет ID3/MPEG заголовка) для текста: {}", text);
+                    }
+                }
+                
+                return Ok((audio_bytes.to_vec(), text.to_string()));
+            } else {
+                let status = resp.status();
+                let error_text = resp.text().await.unwrap_or_else(|_| "Неизвестная ошибка".to_string());
+                
+                // Для 503 ошибок всегда делаем повторную попытку
+                if status == 503 {
+                    warn!("Сервер перегружен (503), попытка #{}: {}", attempt + 1, error_text);
+                    last_error = Some(TtsError::OpenAiApiError(format!(
+                        "Ошибка API (код {}): {}", status, error_text
+                    )));
+                    attempt += 1;
+                    continue;
+                }
+                
+                // Для других ошибок возвращаем сразу
+                return Err(TtsError::OpenAiApiError(format!(
+                    "Ошибка API (код {}): {}", status, error_text
+                )));
             }
         }
-        
-        Ok((audio_bytes.to_vec(), text.to_string()))
+
+        // Если все попытки исчерпаны, возвращаем последнюю ошибку
+        Err(last_error.unwrap_or_else(|| TtsError::OpenAiApiError(
+            "Превышено максимальное количество попыток".to_string()
+        )))
     }
 }
 
@@ -972,7 +1019,9 @@ pub mod audio {
             // Вычисляем, сколько дополнительного времени мы можем использовать
             // Оставляем минимум 1 секунду до следующего cue
             let extra_time_to_use = if available_extra_time > 1.0 {
-                (available_extra_time - 1.0).min(actual_duration - target_duration)
+                // Берем до 90% доступного времени, оставляя хотя бы 10% или 0.5 секунд между сегментами
+                let min_gap = 0.5f32.max(available_extra_time * 0.1);
+                (available_extra_time - min_gap).min(actual_duration - target_duration)
             } else {
                 0.0
             };
@@ -983,10 +1032,10 @@ pub mod audio {
             info!("Используем дополнительное время: {:.3}s, новая целевая длительность: {:.3}s, коэффициент ускорения: {:.3}", 
                   extra_time_to_use, extended_target, speed_factor);
 
-            // Защита от слишком агрессивного ускорения
-            let adjusted_speed_factor = if speed_factor > 3.0 {
-                warn!("Очень высокий коэффициент ускорения ({:.2}), ограничиваем до 3.0", speed_factor);
-                3.0
+            // Защита от слишком агрессивного ускорения - ограничиваем до 2.0 для лучшей разборчивости
+            let adjusted_speed_factor = if speed_factor > 2.0 {
+                warn!("Очень высокий коэффициент ускорения ({:.2}), ограничиваем до 2.0", speed_factor);
+                2.0
             } else {
                 speed_factor
             };
@@ -1172,9 +1221,9 @@ pub mod audio {
     }
 
     /// Микширует две аудиодорожки с заданным соотношением
-    pub fn mix_audio_tracks(voice: &[f32], instrumental: &[f32], voice_ratio: f32) -> Vec<f32> {
+    pub fn mix_audio_tracks(voice: &[f32], instrumental: &[f32], voice_ratio: f32, instrumental_boost: f32) -> Vec<f32> {
         let voice_gain = voice_ratio;
-        let instrumental_gain = 1.0 - voice_ratio;
+        let instrumental_gain = (1.0 - voice_ratio) * instrumental_boost;
         
         let max_len = voice.len().max(instrumental.len());
         let mut mixed = Vec::with_capacity(max_len);
@@ -1183,7 +1232,11 @@ pub mod audio {
             let voice_sample = if i < voice.len() { voice[i] } else { 0.0 };
             let instrumental_sample = if i < instrumental.len() { instrumental[i] } else { 0.0 };
             
-            mixed.push(voice_sample * voice_gain + instrumental_sample * instrumental_gain);
+            // Микшируем с учетом усиления инструментальной дорожки
+            let mixed_sample = voice_sample * voice_gain + instrumental_sample * instrumental_gain;
+            
+            // Предотвращаем клиппинг
+            mixed.push(mixed_sample.clamp(-1.0, 1.0));
         }
         
         mixed
@@ -1254,14 +1307,13 @@ pub mod audio {
 
 /// Основной API библиотеки.
 pub mod synchronizer {
-    use super::{audio, tts, vtt, ProgressUpdate, Result, TtsError, TtsConfig, AudioProcessingConfig};
+    use super::*;
     use futures::future::join_all;
-    use std::path::Path;
     use tokio::sync::mpsc::Sender;
+    use std::path::Path;
     use log::{debug, info, error, warn};
 
-    /// Структура для хранения аудиофрагмента с метаданными
-    #[derive(Debug)]
+    /// Структура одного аудиофрагмента
     pub struct AudioFragment {
         pub samples: Vec<f32>,
         pub sample_rate: u32,
@@ -1271,7 +1323,91 @@ pub mod synchronizer {
         pub next_cue_start: Option<f32>,  // время начала следующего cue, если есть
     }
 
-    /// Параметры для синхронизации.
+    /// Параметры для определения проблемных сегментов
+    #[derive(Debug, Clone)]
+    pub struct SegmentAnalysisConfig {
+        /// Максимальное количество слов в секунду для комфортной речи
+        pub max_words_per_second: f32,
+        /// Максимальный коэффициент ускорения для разборчивой речи
+        pub max_speed_factor: f32,
+    }
+
+    impl Default for SegmentAnalysisConfig {
+        fn default() -> Self {
+            Self {
+                max_words_per_second: 3.5, // ~3.5 слов в секунду - обычная скорость речи
+                max_speed_factor: 2.0,     // Максимальный коэффициент ускорения
+            }
+        }
+    }
+
+    /// Результаты анализа субтитров
+    #[derive(Debug)]
+    pub struct SegmentAnalysisResult {
+        /// Индекс сегмента
+        pub index: usize,
+        /// Количество слов в сегменте
+        pub word_count: usize,
+        /// Длительность сегмента в секундах
+        pub duration: f32,
+        /// Слов в секунду
+        pub words_per_second: f32,
+        /// Критичность проблемы (0-10)
+        pub severity: u8,
+        /// Требуемый коэффициент ускорения
+        pub required_speed_factor: f32,
+    }
+    
+    /// Анализирует сегменты субтитров и выявляет потенциально проблемные по плотности слов
+    fn analyze_segments(cues: &[SubtitleCue], config: &SegmentAnalysisConfig) -> Vec<SegmentAnalysisResult> {
+        let mut results = Vec::new();
+        
+        for (i, cue) in cues.iter().enumerate() {
+            // Подсчитываем количество слов в тексте
+            let word_count = cue.text.split_whitespace().count();
+            let duration = cue.end - cue.start;
+            
+            // Вычисляем количество слов в секунду
+            let words_per_second = if duration > 0.0 {
+                word_count as f32 / duration
+            } else {
+                0.0
+            };
+            
+            // Оцениваем требуемый коэффициент ускорения для TTS
+            // Предполагаем, что TTS генерирует со средней скоростью 2.5 слова в секунду
+            let natural_duration = word_count as f32 / 2.5;
+            let required_speed_factor = if duration > 0.0 {
+                natural_duration / duration
+            } else {
+                1.0
+            };
+            
+            // Оцениваем критичность проблемы
+            let severity = if words_per_second > config.max_words_per_second * 1.5 || required_speed_factor > config.max_speed_factor * 1.2 {
+                10 // Крайне высокая плотность слов
+            } else if words_per_second > config.max_words_per_second || required_speed_factor > config.max_speed_factor {
+                8 // Высокая плотность слов
+            } else if words_per_second > config.max_words_per_second * 0.8 || required_speed_factor > config.max_speed_factor * 0.8 {
+                5 // Повышенная плотность слов
+            } else {
+                0 // Нормальная плотность слов
+            };
+            
+            results.push(SegmentAnalysisResult {
+                index: i,
+                word_count,
+                duration,
+                words_per_second,
+                severity: severity as u8,
+                required_speed_factor,
+            });
+        }
+        
+        results
+    }
+    
+    /// Общая конфигурация для синхронизации
     pub struct SyncConfig<'a> {
         /// API ключ для OpenAI.
         pub api_key: &'a str,
@@ -1332,6 +1468,16 @@ pub mod synchronizer {
         }
         info!("Demucs и зависимости установлены успешно");
 
+        // Сначала проверяем, установлен ли SoundTouch, и устанавливаем его при необходимости
+        info!("Проверка установки SoundTouch перед началом TTS обработки");
+        match super::soundtouch::ensure_soundtouch_installed() {
+            Ok(_) => info!("SoundTouch доступен, приступаем к TTS обработке"),
+            Err(e) => {
+                error!("Не удалось обеспечить наличие SoundTouch: {}", e);
+                return Err(e);
+            }
+        }
+
         // Используем конфигурацию TTS как есть, без определения пола голоса
         let tts_config = config.tts_config.clone();
         info!("Используется голос {} для TTS", tts_config.voice);
@@ -1379,23 +1525,120 @@ pub mod synchronizer {
             }
         });
 
-        // Сначала проверяем, установлен ли SoundTouch, и устанавливаем его при необходимости
-        info!("Проверка установки SoundTouch перед началом TTS обработки");
-        match super::soundtouch::ensure_soundtouch_installed() {
-            Ok(_) => info!("SoundTouch доступен, приступаем к TTS обработке"),
-            Err(e) => {
-                error!("Не удалось обеспечить наличие SoundTouch: {}", e);
-                return Err(e);
-            }
-        }
-
         // 1. Парсинг VTT
         send_progress(&config.progress_sender, ProgressUpdate::ParsingVTT).await;
-        let cues = vtt::parse_vtt(&config.vtt_path)?;
-        send_progress(&config.progress_sender, ProgressUpdate::ParsedVTT { total: cues.len() }).await;
-        println!("Найдено {} реплик", cues.len());
-
-        // Создаем директорию для сохранения MP3-чанков
+        let mut cues = vtt::parse_vtt(&config.vtt_path)?;
+        if cues.is_empty() {
+            return Err(TtsError::VttParsingError("VTT-файл не содержит субтитров".to_string()));
+        }
+        
+        // Анализируем субтитры на наличие проблемных сегментов
+        let analysis_config = SegmentAnalysisConfig::default();
+        let segment_analysis = analyze_segments(&cues, &analysis_config);
+        
+        // Логируем информацию о проблемах сегментах
+        let problematic_segments: Vec<_> = segment_analysis.iter()
+            .filter(|s| s.severity > 0)
+            .collect();
+            
+        if !problematic_segments.is_empty() {
+            info!("Обнаружено {} проблемных сегментов с высокой плотностью слов:", problematic_segments.len());
+            for segment in problematic_segments.iter() {
+                info!("Сегмент #{}: {} слов за {:.2}s, {:.2} слов/сек, требуемое ускорение: {:.2}x (критичность: {})",
+                    segment.index, segment.word_count, segment.duration, segment.words_per_second, 
+                    segment.required_speed_factor, segment.severity);
+            }
+            
+            // Перераспределяем время между сегментами для критичных случаев
+            // Только для сильно проблемных сегментов (критичность > 7)
+            let critical_segments: Vec<_> = problematic_segments.iter()
+                .filter(|s| s.severity > 7)
+                .collect();
+                
+            if !critical_segments.is_empty() {
+                info!("Перераспределение времени для {} критичных сегментов", critical_segments.len());
+                
+                // Сначала создаем карту свободного времени для каждого сегмента
+                // Это время, которое можно "одолжить" у соседних сегментов
+                let mut free_time_map: Vec<f32> = vec![0.0; cues.len()];
+                
+                // Для каждого сегмента определяем свободное время
+                for i in 0..cues.len() {
+                    let word_count = cues[i].text.split_whitespace().count();
+                    let duration = cues[i].end - cues[i].start;
+                    
+                    // Предполагаем, что для комфортной речи нужно ~2.5 слова/сек
+                    let needed_time = word_count as f32 / 2.5;
+                    
+                    // Если у сегмента больше времени, чем нужно, отмечаем излишек
+                    if duration > needed_time && duration > 1.0 {
+                        // Оставляем минимум 0.5 сек для очень коротких сегментов и 80% длительности для длинных
+                        let min_duration = 0.5f32.max(needed_time * 1.2);
+                        let available = (duration - min_duration).max(0.0);
+                        
+                        free_time_map[i] = available;
+                    }
+                }
+                
+                // Теперь для каждого критичного сегмента пробуем найти дополнительное время
+                for segment in critical_segments {
+                    let idx = segment.index;
+                    let needed_duration = segment.word_count as f32 / 2.5;
+                    let current_duration = cues[idx].end - cues[idx].start;
+                    
+                    // Сколько дополнительного времени нам нужно для приемлемого ускорения (до 1.8x)
+                    let extra_time_needed = (needed_duration / 1.8 - current_duration).max(0.0);
+                    
+                    if extra_time_needed > 0.0 {
+                        let mut borrowed_time = 0.0;
+                        
+                        // Проверяем следующий сегмент, если он существует
+                        if idx + 1 < cues.len() && free_time_map[idx + 1] > 0.0 {
+                            let borrow_amount = free_time_map[idx + 1].min(extra_time_needed * 0.7);
+                            if borrow_amount > 0.0 {
+                                // Заимствуем время, сдвигая конец текущего сегмента
+                                cues[idx].end += borrow_amount;
+                                
+                                // Также сдвигаем начало следующего сегмента
+                                cues[idx + 1].start += borrow_amount;
+                                
+                                // Обновляем карту свободного времени
+                                free_time_map[idx + 1] -= borrow_amount;
+                                borrowed_time += borrow_amount;
+                                
+                                info!("Сегмент #{}: заимствовано {:.2}s у следующего сегмента", idx, borrow_amount);
+                            }
+                        }
+                        
+                        // Проверяем предыдущий сегмент, если он существует и нам все еще нужно время
+                        if borrowed_time < extra_time_needed && idx > 0 && free_time_map[idx - 1] > 0.0 {
+                            let remaining_need = extra_time_needed - borrowed_time;
+                            let borrow_amount = free_time_map[idx - 1].min(remaining_need * 0.7);
+                            
+                            if borrow_amount > 0.0 {
+                                // Заимствуем время, сдвигая начало текущего сегмента
+                                cues[idx].start -= borrow_amount;
+                                
+                                // Также сдвигаем конец предыдущего сегмента
+                                cues[idx - 1].end -= borrow_amount;
+                                
+                                // Обновляем карту свободного времени
+                                free_time_map[idx - 1] -= borrow_amount;
+                                borrowed_time += borrow_amount;
+                                
+                                info!("Сегмент #{}: заимствовано {:.2}s у предыдущего сегмента", idx, borrow_amount);
+                            }
+                        }
+                        
+                        // Обновляем длительность сегмента и записываем в лог
+                        let new_duration = cues[idx].end - cues[idx].start;
+                        let new_speed_factor = segment.word_count as f32 / 2.5 / new_duration;
+                        
+                        info!("Сегмент #{}: длительность {:.2}s -> {:.2}s, ускорение {:.2}x -> {:.2}x", idx, current_duration, new_duration, segment.required_speed_factor, new_speed_factor);
+                    }
+                }
+            }
+        }
         let debug_dir = config.output_wav.parent()
             .ok_or_else(|| TtsError::ConfigError("Некорректный путь к выходному файлу".to_string()))?
             .join("debug_mp3_chunks");
@@ -1795,7 +2038,8 @@ pub mod synchronizer {
                             final_audio = audio::mix_audio_tracks(
                                 &final_audio,
                                 &instrumental_audio,
-                                config.audio_config.voice_to_instrumental_ratio
+                                config.audio_config.voice_to_instrumental_ratio,
+                                config.audio_config.instrumental_boost
                             );
                             
                             // Сохраняем микшированную версию для отладки

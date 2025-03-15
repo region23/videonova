@@ -201,6 +201,12 @@ watch(() => props.isLoading, (newVal) => {
 watch(() => props.youtubeUrl, (newUrl, oldUrl) => {
   console.log('YouTube URL prop changed:', { newUrl, oldUrl, previousUrl: previousUrl.value });
   
+  // Only reset states if the component is fully mounted to prevent "uninitialized variable" errors
+  if (typeof resetStates === 'function') {
+    // Reset all completion states first
+    resetStates();
+  }
+  
   // Если URL пустой или удален, сразу отправляем событие о неготовности видео
   if (!newUrl || newUrl.trim() === '') {
     console.log('Empty URL detected, video info is not ready');
@@ -212,7 +218,6 @@ watch(() => props.youtubeUrl, (newUrl, oldUrl) => {
     // If we have a new YouTube URL and it's different from the previous one
     if (!previousUrl.value || !newUrl.includes(previousUrl.value)) {
       console.log('YouTube URL prop changed, setting loading state');
-      resetState(); // Reset state first
       internalIsLoading.value = true;
       emit('loading-state-change', true);
       // Video is not ready while loading
@@ -230,7 +235,7 @@ watch(() => props.youtubeUrl, (newUrl, oldUrl) => {
     // Video is not ready when URL is cleared
     emit('video-info-ready-state-change', false);
   }
-}, { immediate: true });
+});
 
 // Add a watcher for shouldHideVideoInfo to log when it changes
 watch(shouldHideVideoInfo, (newVal) => {
@@ -722,53 +727,65 @@ async function setupEventListeners() {
         currentStep: currentStep.value
       });
       
-      // Set completion flags immediately
-      outputDirectory.value = event.payload.output_dir;
-      finalVideoPath.value = event.payload.merged_video_path;
-      translationComplete.value = true;
-      mergeStepComplete.value = true;
-      isMerging.value = false;
-      isTTSGenerating.value = false;  // Make sure TTS state is also cleared
-      
-      // Clear progress states
-      mergeProgress.value = null;
-      ttsProgress.value = null;
-
-      // Clean up temporary files and move final video
-      try {
-        await invoke('cleanup_temp_files', {
-          final_video_path: finalVideoPath.value,
-          output_dir: outputDirectory.value
+      // Use requestAnimationFrame to ensure UI updates happen first
+      requestAnimationFrame(() => {
+        // Set completion flags immediately
+        outputDirectory.value = event.payload.output_dir;
+        finalVideoPath.value = event.payload.merged_video_path;
+        translationComplete.value = true;
+        mergeStepComplete.value = true;
+        isMerging.value = false;
+        isTTSGenerating.value = false;  // Make sure TTS state is also cleared
+        
+        // Clear progress states
+        mergeProgress.value = null;
+        ttsProgress.value = null;
+        
+        // Log state after update
+        console.log('State after update:', {
+          translationComplete: translationComplete.value,
+          mergeStepComplete: mergeStepComplete.value,
+          isMerging: isMerging.value,
+          outputDirectory: outputDirectory.value,
+          finalVideoPath: finalVideoPath.value,
+          currentStep: currentStep.value
         });
+        
+        // Force UI update and emit events after brief delay
+        setTimeout(() => {
+          // Reset internal state
+          internalIsLoading.value = false;
+          previousUrl.value = null;
+          shouldHideVideoInfo.value = true;
+          initialLoadDone.value = false;
+          
+          // Emit completion event
+          emit('merge-complete', event.payload.output_dir);
+          // Clear video info to reset the URL input
+          emit('clear-video-info');
+          // Explicitly emit video info ready state change
+          emit('video-info-ready-state-change', false);
+        }, 50);
+      });
+      
+      // Clean up temporary files AFTER UI updates
+      try {
+        setTimeout(async () => {
+          if (finalVideoPath.value && outputDirectory.value) {
+            await invoke('cleanup_temp_files', {
+              finalVideoPath: finalVideoPath.value,
+              outputDir: outputDirectory.value
+            });
+          } else {
+            console.warn('Missing required paths for cleanup:', {
+              finalVideoPath: finalVideoPath.value,
+              outputDirectory: outputDirectory.value
+            });
+          }
+        }, 100);
       } catch (error) {
         console.error('Error during cleanup:', error);
       }
-      
-      // Log state after update
-      console.log('State after update:', {
-        translationComplete: translationComplete.value,
-        mergeStepComplete: mergeStepComplete.value,
-        isMerging: isMerging.value,
-        outputDirectory: outputDirectory.value,
-        finalVideoPath: finalVideoPath.value,
-        currentStep: currentStep.value
-      });
-      
-      // Force UI update and emit events
-      nextTick(() => {
-        // Reset internal state
-        internalIsLoading.value = false;
-        previousUrl.value = null;
-        shouldHideVideoInfo.value = true;
-        initialLoadDone.value = false;
-        
-        // Emit completion event
-        emit('merge-complete', event.payload.output_dir);
-        // Clear video info to reset the URL input
-        emit('clear-video-info');
-        // Explicitly emit video info ready state change
-        emit('video-info-ready-state-change', false);
-      });
     });
 
     // Обновляем обработчик ошибки merge
@@ -966,20 +983,23 @@ watch(() => props.mergeProgress, (newProgress) => {
     newProgress
   });
 
-  if (newProgress && !translationComplete.value) {
+  if (newProgress) {
     trackUIBlocking('Merge progress update');
+    
+    // Always update merge progress regardless of translationComplete value
     mergeProgress.value = newProgress;
-    isMerging.value = newProgress.progress < 100;
+    
+    // Only update isMerging if translation is not already complete
+    if (!translationComplete.value) {
+      isMerging.value = newProgress.progress < 100;
+    }
     
     console.log('After update:', {
       mergeProgress: mergeProgress.value,
       isMerging: isMerging.value
     });
   } else {
-    console.log('Skipping merge progress update:', {
-      hasNewProgress: !!newProgress,
-      translationComplete: translationComplete.value
-    });
+    console.log('Skipping merge progress update: no new progress data');
   }
 }, { immediate: true })
 
@@ -1240,12 +1260,21 @@ function debugLog(component: string, conditions: Record<string, any>) {
     ])
   );
   
+  // Find failing conditions
+  const failingConditions = Object.entries(booleanConditions)
+    .filter(([_, value]) => !value)
+    .map(([key]) => key);
+  
+  const result = Object.values(booleanConditions).every(v => v);
+  
   console.log(`=== ${component} Visibility Check ===`, {
     conditions,
-    booleanResult: Object.values(booleanConditions).every(v => v)
+    booleanResult: result,
+    visibilityStatus: result ? "VISIBLE" : "HIDDEN",
+    failingConditions: failingConditions.length > 0 ? failingConditions : "none"
   });
   
-  return Object.values(booleanConditions).every(v => v);
+  return result;
 }
 
 // Add state logging helper
@@ -1282,6 +1311,25 @@ const isServiceCheckVisible = computed(() =>
 const handleServiceCheckHidden = () => {
   console.log('Service check has been hidden')
   serviceCheckManuallyHidden.value = true
+}
+
+// Add resetStates method after other methods
+const resetStates = () => {
+  translationComplete.value = false;
+  downloadStepComplete.value = false;
+  transcriptionStepComplete.value = false;
+  translationStepComplete.value = false;
+  ttsStepComplete.value = false;
+  mergeStepComplete.value = false;
+  isDownloadComplete.value = false;
+  outputDirectory.value = null;
+  mergeError.value = null;
+  audioProgress.value = null;
+  videoProgress.value = null;
+  transcriptionProgress.value = null;
+  translationProgress.value = null;
+  ttsProgress.value = null;
+  mergeProgress.value = null;
 }
 </script>
 
@@ -1392,7 +1440,8 @@ const handleServiceCheckHidden = () => {
     <!-- Translation Complete Message -->
     <div v-if="debugLog('Success Message', {
       isComplete: translationComplete,
-      hasOutputDir: !!outputDirectory
+      hasOutputDir: !!outputDirectory,
+      hasFinalPath: !!finalVideoPath
     })" class="translation-complete-container">
       <div class="success-message">
         <div class="success-icon">✓</div>

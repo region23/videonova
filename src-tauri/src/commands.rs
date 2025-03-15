@@ -476,10 +476,11 @@ async fn enhanced_tts_with_logging(
                     
                     // Create audio processing configuration with sensible defaults
                     let audio_config = AudioProcessingConfig {
-                        window_size: 4096,
-                        hop_size: 1024,
+                        window_size: 512,
+                        hop_size: 256,
                         target_peak_level: 0.8,
                         voice_to_instrumental_ratio: 0.6,
+                        instrumental_boost: 1.5,
                     };
                     
                     // Create the sync configuration
@@ -836,7 +837,7 @@ pub async fn process_video(
     info!("Step 4: Generating speech and synchronizing with video");
     
     // Create a dedicated TTS directory for intermediate audio files
-    let tts_dir = PathBuf::from(&output_path).join("tts");
+    let tts_dir = PathBuf::from(&output_path).join("videonova_temp").join("tts");
     tokio::fs::create_dir_all(&tts_dir)
         .await
         .map_err(|e| format!("Failed to create TTS directory: {}", e))?;
@@ -1061,9 +1062,6 @@ pub async fn cleanup_temp_files(final_video_path: String, output_dir: String) ->
         .to_str()
         .ok_or("Invalid video filename")?;
 
-    // Construct the destination path in the output directory
-    let destination_path = cleanup_dir.join(final_video_name);
-
     // Get the base filename (without extension and language suffix) from the final video
     let base_filename = std::path::Path::new(&final_video_path)
         .file_stem()
@@ -1081,69 +1079,15 @@ pub async fn cleanup_temp_files(final_video_path: String, output_dir: String) ->
     info!("Base filename for cleanup: {}", base_filename);
     info!("Cleaning up in directory: {}", cleanup_dir.display());
 
-    // Define and remove known temporary directories
-    let temp_directories = ["tts"];
-    for dir_name in temp_directories.iter() {
-        let dir_path = cleanup_dir.join(dir_name);
-        if dir_path.exists() && dir_path.is_dir() {
-            info!("Removing directory: {}", dir_path.display());
-            if let Err(e) = tokio::fs::remove_dir_all(&dir_path).await {
-                warn!("Failed to remove temporary directory {}: {}", dir_path.display(), e);
-            } else {
-                info!("Successfully removed temporary directory: {}", dir_path.display());
-            }
+    // Remove the entire videonova_temp directory
+    let temp_dir = cleanup_dir.join("videonova_temp");
+    if temp_dir.exists() && temp_dir.is_dir() {
+        info!("Removing temporary directory: {}", temp_dir.display());
+        if let Err(e) = tokio::fs::remove_dir_all(&temp_dir).await {
+            warn!("Failed to remove temporary directory {}: {}", temp_dir.display(), e);
+        } else {
+            info!("Successfully removed temporary directory: {}", temp_dir.display());
         }
-    }
-
-    // Remove temporary files in the output directory
-    let mut entries = tokio::fs::read_dir(cleanup_dir).await
-        .map_err(|e| format!("Failed to read output directory: {}", e))?;
-
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.is_file() {
-            let file_name = path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-
-            // Check if the file starts with base_filename and has one of our temp extensions
-            let is_temp_file = file_name.starts_with(base_filename) && (
-                file_name.ends_with("_audio.m4a") ||
-                file_name.ends_with("_video.mp4") ||
-                file_name.ends_with(".vtt") ||
-                file_name.ends_with(".ass") ||
-                file_name.ends_with("_tts.wav")
-            );
-
-            if is_temp_file {
-                info!("Removing temporary file: {}", path.display());
-                if let Err(e) = tokio::fs::remove_file(&path).await {
-                    warn!("Failed to remove temporary file {}: {}", path.display(), e);
-                } else {
-                    info!("Successfully removed temporary file: {}", path.display());
-                }
-            } else {
-                info!("Skipping non-temporary file: {}", file_name);
-            }
-        }
-    }
-
-    // Ensure the final video is in the correct location
-    if final_video_path != destination_path.to_string_lossy() {
-        info!("Moving final video from {} to {}", final_video_path, destination_path.display());
-        if let Err(e) = tokio::fs::rename(&final_video_path, &destination_path).await {
-            // If rename fails (possibly due to cross-device link), try copy and delete
-            if let Err(copy_err) = tokio::fs::copy(&final_video_path, &destination_path).await {
-                error!("Failed to copy video file: {}", copy_err);
-                return Err(format!("Failed to move video file: {}", e));
-            }
-            if let Err(del_err) = tokio::fs::remove_file(&final_video_path).await {
-                warn!("Failed to remove source video file after copying: {}", del_err);
-            }
-        }
-        info!("Successfully moved final video to: {}", destination_path.display());
-    } else {
-        info!("Final video is already in the correct location");
     }
 
     Ok(())
