@@ -435,6 +435,7 @@ const handleClearVideoInfo = () => {
           <div class="content-card info-content">
             <VideoPreview 
               :video-info="videoInfo"
+              :youtube-url="videoInfo?.url || ''"
               @merge-complete="handleMergeComplete"
               @video-info-ready-state-change="handleVideoInfoReadyStateChange"
               :transcription-progress="transcriptionProgress"
