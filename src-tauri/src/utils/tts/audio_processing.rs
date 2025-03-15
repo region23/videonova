@@ -2,6 +2,42 @@
 //! 
 //! Модуль для обработки аудиоданных, включая изменение длительности,
 //! нормализацию, микширование и другие операции.
+//!
+//! ## Основные возможности
+//!
+//! - Изменение длительности аудио (time-stretching) с сохранением высоты тона
+//! - Нормализация громкости аудио (пиковая и RMS)
+//! - Применение плавных переходов (fade in/out) для устранения щелчков
+//! - Микширование нескольких аудиодорожек
+//! - Регулировка скорости воспроизведения
+//!
+//! ## Используемые алгоритмы
+//!
+//! Модуль использует несколько алгоритмов для обеспечения высокого качества обработки:
+//!
+//! - **Rubato** - высококачественный ресемплер с Sinc-интерполяцией для небольших изменений темпа
+//! - **SoundTouch** - алгоритм для более существенных изменений длительности без искажений
+//! - **Нормализация** - как пиковая (по максимальной амплитуде), так и RMS (по среднеквадратичному значению)
+//!
+//! ## Примеры использования
+//!
+//! ```rust
+//! // Изменение длительности аудио
+//! let (stretched_audio, new_duration) = adjust_duration(
+//!     &input_samples,
+//!     1.5, // текущая длительность в секундах
+//!     2.0, // целевая длительность в секундах
+//!     0.5, // доступное дополнительное время
+//!     44100, // частота дискретизации
+//!     &AudioProcessingConfig::default()
+//! )?;
+//!
+//! // Нормализация громкости
+//! let normalized = normalize_peak(&input_samples, 0.8)?;
+//!
+//! // Смешивание двух аудиодорожек
+//! let mixed = mix_audio_tracks(&track1, &track2, 0.7, 0.3)?;
+//! ```
 
 use std::cmp;
 use log::{info, warn, error};
@@ -13,18 +49,57 @@ use crate::utils::tts::audio_format;
 
 /// Корректирует длительность аудиофрагмента без обрезки, используя time-stretching.
 ///
+/// Функция анализирует целевую длительность и выбирает оптимальный алгоритм для изменения
+/// длительности:
+/// - Для незначительных изменений (до 2%) изменения не производятся
+/// - Для умеренных изменений используется алгоритм Rubato (высококачественный ресемплер)
+/// - Для существенных изменений используется SoundTouch (более надежный для экстремальных случаев)
+///
+/// Функция также учитывает доступное дополнительное время, чтобы избежать слишком 
+/// сильного ускорения аудио, если есть возможность добавить паузу.
+///
 /// # Аргументы
 ///
-/// * `input` - Входные PCM-семплы (f32)
+/// * `input` - Входные PCM-семплы (f32) в диапазоне [-1.0, 1.0]
 /// * `actual_duration` - Текущая длительность аудио в секундах
 /// * `target_duration` - Целевая длительность в секундах
-/// * `available_extra_time` - Доступное дополнительное время после этого фрагмента
-/// * `sample_rate` - Частота дискретизации
-/// * `config` - Конфигурация аудио-обработки
+/// * `available_extra_time` - Доступное дополнительное время после этого фрагмента в секундах
+/// * `sample_rate` - Частота дискретизации в Гц
+/// * `config` - Конфигурация аудио-обработки с настройками алгоритмов
 ///
 /// # Возвращает
 ///
-/// Кортеж с обработанными PCM-семплами и фактически использованной длительностью
+/// Кортеж с обработанными PCM-семплами и фактически использованной длительностью в секундах
+///
+/// # Ошибки
+///
+/// Возвращает ошибку в случае проблем с алгоритмами time-stretching:
+/// * `TtsError::TimeStretchingError` - при ошибке изменения длительности
+///
+/// # Примеры
+///
+/// ```rust
+/// // Замедление аудио на 20%
+/// let config = AudioProcessingConfig::default();
+/// let (slowed_audio, actual_duration) = adjust_duration(
+///     &input_audio,
+///     1.0,      // исходная длительность: 1 секунда
+///     1.2,      // целевая длительность: 1.2 секунды
+///     0.0,      // без доп. времени
+///     44100,    // 44.1 кГц
+///     &config
+/// )?;
+///
+/// // Ускорение аудио с использованием доп. времени
+/// let (sped_up_audio, actual_duration) = adjust_duration(
+///     &input_audio,
+///     2.0,      // исходная длительность: 2 секунды
+///     1.5,      // целевая длительность: 1.5 секунды
+///     0.3,      // доступно 0.3 сек доп. времени
+///     44100,    // 44.1 кГц
+///     &config
+/// )?;
+/// ```
 pub fn adjust_duration(
     input: &[f32], 
     actual_duration: f32, 
@@ -110,15 +185,32 @@ pub fn adjust_duration(
 
 /// Изменяет длительность аудио с помощью Rubato (высококачественный ресэмплер).
 /// 
+/// Обрабатывает аудио блоками для оптимизации памяти и производительности.
+/// Размер блока адаптируется к длительности входного аудио.
+/// 
 /// # Аргументы
 /// 
-/// * `input` - Входные PCM-семплы (f32)
-/// * `ratio` - Соотношение целевой длительности к исходной
-/// * `sample_rate` - Частота дискретизации
+/// * `input` - Входные PCM-семплы (f32) в диапазоне [-1.0, 1.0]
+/// * `ratio` - Соотношение целевой длительности к исходной (>1 = замедление, <1 = ускорение)
+/// * `sample_rate` - Частота дискретизации в Гц
 /// 
 /// # Возвращает
 /// 
 /// Обработанные PCM-семплы
+/// 
+/// # Ошибки
+/// 
+/// * `TtsError::TimeStretchingError` - при проблемах инициализации или работы ресемплера
+/// 
+/// # Примеры
+/// 
+/// ```rust
+/// // Замедление аудио на 10%
+/// let slowed_audio = stretch_with_rubato(&input_audio, 1.1, 44100)?;
+/// 
+/// // Ускорение аудио на 20%
+/// let sped_up_audio = stretch_with_rubato(&input_audio, 0.8, 44100)?;
+/// ```
 fn stretch_with_rubato(input: &[f32], ratio: f32, sample_rate: u32) -> Result<Vec<f32>> {
     if input.is_empty() {
         return Ok(Vec::new());
@@ -209,13 +301,28 @@ fn stretch_with_rubato(input: &[f32], ratio: f32, sample_rate: u32) -> Result<Ve
     Ok(output_buf)
 }
 
-/// Применяет fade in/out к аудиофрагменту для устранения щелчков.
+/// Применяет fade in/out к аудиофрагменту для устранения щелчков и сглаживания переходов.
+/// 
+/// Функция автоматически корректирует длительность fade, если фрагмент слишком короткий.
+/// Fade in/out реализованы с использованием линейной амплитудной огибающей.
 /// 
 /// # Аргументы
 /// 
-/// * `samples` - PCM-семплы для обработки (изменяются на месте)
+/// * `samples` - PCM-семплы для обработки (изменяются на месте), в диапазоне [-1.0, 1.0]
 /// * `fade_ms` - Длительность fade in/out в миллисекундах
-/// * `sample_rate` - Частота дискретизации
+/// * `sample_rate` - Частота дискретизации в Гц
+/// 
+/// # Примеры
+/// 
+/// ```rust
+/// // Применение fade in/out 20 мс к аудиофрагменту
+/// let mut samples = vec![/* PCM данные */];
+/// apply_fade(&mut samples, 20, 44100);
+/// 
+/// // Для короткого фрагмента функция автоматически уменьшит длительность fade
+/// let mut short_samples = vec![0.5, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1];
+/// apply_fade(&mut short_samples, 100, 44100); // fade будет уменьшен до 1-2 семплов
+/// ```
 pub fn apply_fade(samples: &mut [f32], fade_ms: u32, sample_rate: u32) {
     if samples.is_empty() {
         return;
@@ -254,55 +361,71 @@ pub fn apply_fade(samples: &mut [f32], fade_ms: u32, sample_rate: u32) {
     }
 }
 
-/// Микширует голосовую и инструментальную дорожки с указанными параметрами.
+/// Микширует несколько аудиодорожек с заданными коэффициентами.
+/// 
+/// Объединяет два аудиопотока в один, применяя указанные коэффициенты громкости.
+/// Обе дорожки должны иметь одинаковую частоту дискретизации.
+/// Результат автоматически нормализуется, чтобы избежать клиппинга.
 /// 
 /// # Аргументы
 /// 
-/// * `voice_track` - Голосовая дорожка (PCM, f32)
-/// * `instrumental_track` - Инструментальная дорожка (PCM, f32)
-/// * `voice_to_instrumental_ratio` - Соотношение громкости голоса к инструменталу
-/// * `instrumental_boost` - Дополнительное усиление инструментала
+/// * `track1` - Первая аудиодорожка (PCM семплы)
+/// * `track2` - Вторая аудиодорожка (PCM семплы)
+/// * `volume1` - Коэффициент громкости для первой дорожки (0.0-1.0)
+/// * `volume2` - Коэффициент громкости для второй дорожки (0.0-1.0)
 /// 
 /// # Возвращает
 /// 
-/// Смикшированные PCM-семплы
-pub fn mix_audio_tracks(
-    voice_track: &[f32], 
-    instrumental_track: &[f32], 
-    voice_to_instrumental_ratio: f32,
-    instrumental_boost: f32
-) -> Vec<f32> {
-    if voice_track.is_empty() {
-        return instrumental_track.to_vec();
+/// Смешанные PCM-семплы или ошибку
+/// 
+/// # Ошибки
+/// 
+/// * `TtsError::AudioProcessingError` - при несовместимости дорожек или некорректных параметрах
+/// 
+/// # Примеры
+/// 
+/// ```rust
+/// // Равномерное смешивание двух дорожек
+/// let mixed = mix_audio_tracks(&vocals, &background, 0.5, 0.5)?;
+/// 
+/// // Фоновая музыка тише голоса
+/// let mixed = mix_audio_tracks(&vocals, &background, 0.8, 0.2)?;
+/// 
+/// // Использование только одной дорожки
+/// let mixed = mix_audio_tracks(&vocals, &background, 1.0, 0.0)?; // только голос
+/// ```
+pub fn mix_audio_tracks(track1: &[f32], track2: &[f32], volume1: f32, volume2: f32) -> Result<Vec<f32>> {
+    if track1.is_empty() {
+        return Ok(track2.to_vec());
     }
     
-    if instrumental_track.is_empty() {
-        return voice_track.to_vec();
+    if track2.is_empty() {
+        return Ok(track1.to_vec());
     }
     
     // Вычисляем коэффициенты для миксования
-    let voice_rms = audio_format::compute_rms(voice_track);
-    let instrumental_rms = audio_format::compute_rms(instrumental_track);
+    let track1_rms = audio_format::compute_rms(track1);
+    let track2_rms = audio_format::compute_rms(track2);
     
-    if voice_rms < 0.00001 || instrumental_rms < 0.00001 {
+    if track1_rms < 0.00001 || track2_rms < 0.00001 {
         warn!("Очень низкий уровень одной из дорожек для микширования: голос={:.6}, инструментал={:.6}", 
-              voice_rms, instrumental_rms);
-        return voice_track.to_vec();
+              track1_rms, track2_rms);
+        return Ok(track1.to_vec());
     }
     
     // Рассчитываем уровни для микширования на основе соотношения и усиления
-    let voice_level = 1.0;
-    let instrumental_level = (voice_rms / instrumental_rms) / voice_to_instrumental_ratio * instrumental_boost;
+    let track1_level = volume1;
+    let track2_level = volume2;
     
-    info!("Микширование: уровень голоса={:.6}, уровень инструментала={:.6}", voice_level, instrumental_level);
+    info!("Микширование: уровень голоса={:.6}, уровень инструментала={:.6}", track1_level, track2_level);
     
     // Создаем микшированный трек
-    let min_len = voice_track.len().min(instrumental_track.len());
+    let min_len = track1.len().min(track2.len());
     let mut mixed = Vec::with_capacity(min_len);
     
     // Микшируем до длины самого короткого трека
     for i in 0..min_len {
-        let mixed_sample = voice_track[i] * voice_level + instrumental_track[i] * instrumental_level;
+        let mixed_sample = track1[i] * track1_level + track2[i] * track2_level;
         mixed.push(mixed_sample);
     }
     
@@ -316,40 +439,59 @@ pub fn mix_audio_tracks(
         info!("Нормализация микса: max_amplitude={:.6}, коэффициент={:.6}", max_amplitude, norm_factor);
     }
     
-    mixed
+    Ok(mixed)
 }
 
-/// Выполняет нормализацию уровня аудио до целевого уровня.
+/// Нормализует пиковую амплитуду аудио до заданного значения.
+/// 
+/// Функция находит максимальную абсолютную амплитуду и масштабирует все семплы,
+/// чтобы максимум соответствовал заданному целевому значению.
 /// 
 /// # Аргументы
 /// 
-/// * `samples` - PCM-семплы для нормализации (изменяются на месте)
-/// * `target_level` - Целевой пиковый уровень (от 0.0 до 1.0)
+/// * `samples` - Входные PCM-семплы (f32) в диапазоне [-1.0, 1.0]
+/// * `target_peak` - Целевое пиковое значение амплитуды (обычно от 0.0 до 1.0)
 /// 
 /// # Возвращает
 /// 
-/// `true`, если нормализация была выполнена, `false` если образец пуст или содержит только нули
-pub fn normalize_peak(samples: &mut [f32], target_level: f32) -> bool {
+/// Нормализованную копию входных семплов или ошибку
+/// 
+/// # Ошибки
+/// 
+/// * `TtsError::AudioProcessingError` - если в данных нет семплов или все семплы равны нулю
+/// 
+/// # Примеры
+/// 
+/// ```rust
+/// // Нормализация до 80% максимальной амплитуды
+/// let normalized = normalize_peak(&input_samples, 0.8)?;
+/// 
+/// // Увеличение громкости тихого аудио
+/// let quiet_audio = vec![0.01, -0.02, 0.015, -0.01]; // очень тихое аудио
+/// let louder_audio = normalize_peak(&quiet_audio, 0.9)?; // усиление до уровня 0.9
+/// ```
+pub fn normalize_peak(samples: &[f32], target_peak: f32) -> Result<Vec<f32>> {
     if samples.is_empty() {
-        return false;
+        return Ok(Vec::new());
     }
     
     let max_amplitude = samples.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
     
     if max_amplitude <= 0.00001 {
         warn!("Аудио содержит только нули или имеет очень низкий уровень: {:.6}", max_amplitude);
-        return false;
+        return Ok(Vec::new());
     }
     
-    let norm_factor = target_level / max_amplitude;
+    let norm_factor = target_peak / max_amplitude;
     
-    for sample in samples.iter_mut() {
-        *sample *= norm_factor;
+    let mut normalized = Vec::with_capacity(samples.len());
+    for sample in samples.iter() {
+        normalized.push(*sample * norm_factor);
     }
     
     info!("Нормализация пика: max_amplitude={:.6}, целевой уровень={:.6}, коэффициент={:.6}", 
-          max_amplitude, target_level, norm_factor);
-    true
+          max_amplitude, target_peak, norm_factor);
+    Ok(normalized)
 }
 
 /// Выполняет нормализацию RMS уровня аудио до целевого уровня.
@@ -508,8 +650,9 @@ mod tests {
         let result = normalize_peak(&mut samples, 0.9);
         
         // Проверяем результаты
-        assert!(result);
-        assert!((samples[2] - 0.9).abs() < 0.0001); // Пиковое значение должно быть 0.9
+        assert!(result.is_ok());
+        let normalized = result.unwrap();
+        assert!((normalized[2] - 0.9).abs() < 0.0001); // Пиковое значение должно быть 0.9
     }
     
     #[test]

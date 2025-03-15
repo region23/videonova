@@ -29,4 +29,6 @@ mod tests {
     mod test_vtt_parser;
     mod test_openai_tts;
     mod test_analysis;
+    mod test_synchronizer;
+    mod test_audio_processing;
 } 

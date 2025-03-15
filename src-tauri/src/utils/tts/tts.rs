@@ -14,6 +14,9 @@
 //!
 //! ВНИМАНИЕ: Этот файл содержит обратно-совместимое API, использующее новую модульную
 //! архитектуру TTS. Для новой разработки рекомендуется использовать новые модули напрямую.
+//! 
+//! @deprecated Это устаревший модуль, который будет удален в будущих версиях. 
+//! Используйте новые модули для реализации функциональности TTS.
 
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::Sender;
@@ -34,6 +37,7 @@ pub use crate::utils::tts::analysis::{
 pub use crate::utils::tts::demucs::DemucsSeparationProgress;
 
 /// Асинхронно отправляет обновление прогресса, если передан канал отправителя
+#[deprecated(since = "1.0.0", note = "Используйте crate::utils::tts::types::send_progress вместо этой функции")]
 pub async fn send_progress(sender: &Option<Sender<ProgressUpdate>>, update: ProgressUpdate) {
     if let Some(tx) = sender {
         let _ = tx.send(update.clone()).await;
@@ -41,6 +45,7 @@ pub async fn send_progress(sender: &Option<Sender<ProgressUpdate>>, update: Prog
 }
 
 // Эта структура обеспечивает обратную совместимость со старой SyncConfig
+#[deprecated(since = "1.0.0", note = "Используйте crate::utils::tts::types::SyncConfig вместо этой структуры")]
 #[derive(Debug, Clone)]
 pub struct SyncConfig<'a> {
     /// API ключ для OpenAI.
@@ -60,6 +65,7 @@ pub struct SyncConfig<'a> {
 }
 
 impl<'a> SyncConfig<'a> {
+    #[deprecated(since = "1.0.0", note = "Используйте crate::utils::tts::types::SyncConfig вместо этой структуры")]
     pub fn new(
         api_key: &'a str,
         vtt_path: &'a Path,
@@ -79,6 +85,7 @@ impl<'a> SyncConfig<'a> {
 
 /// Эта функция обеспечивает обратную совместимость с существующим API.
 /// Она преобразует старую конфигурацию в новую и вызывает новую функцию синхронизации.
+#[deprecated(since = "1.0.0", note = "Используйте crate::utils::tts::synchronize_tts вместо этой функции")]
 pub async fn process_sync(config: SyncConfig<'_>) -> Result<()> {
     info!("Запуск синхронизации TTS с использованием новой модульной архитектуры...");
     
@@ -112,16 +119,20 @@ pub async fn process_sync(config: SyncConfig<'_>) -> Result<()> {
 }
 
 /// Работа с OpenAI TTS API.
+#[deprecated(since = "1.0.0", note = "Используйте crate::utils::tts::openai_tts напрямую")]
 pub use crate::utils::tts::openai_tts as tts;
 
 /// Функции для аудио-обработки.
+#[deprecated(since = "1.0.0", note = "Используйте crate::utils::tts::audio_format напрямую")]
 pub use crate::utils::tts::audio_format;
+#[deprecated(since = "1.0.0", note = "Используйте crate::utils::tts::audio_processing напрямую")]
 pub use crate::utils::tts::audio_processing;
 
 /// Функция для удаления вокала из аудио
 pub mod demucs {
     pub use crate::utils::tts::demucs::*;
     
+    #[deprecated(since = "1.0.0", note = "Используйте crate::utils::tts::separate_audio вместо этой функции")]
     pub async fn remove_vocals<P: AsRef<std::path::Path>>(
         input_path: P,
         output_path: P,
@@ -164,6 +175,7 @@ pub mod audio {
     pub use crate::utils::tts::audio_processing::*;
     
     // Для обратной совместимости с вызовами remove_vocals из audio модуля
+    #[deprecated(since = "1.0.0", note = "Используйте crate::utils::tts::separate_audio вместо этой функции")]
     pub async fn remove_vocals<P: AsRef<std::path::Path>>(
         input_path: P, 
         output_path: P,
