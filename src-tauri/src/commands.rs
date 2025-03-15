@@ -10,8 +10,10 @@ use serde_json::json;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 use tauri_plugin_opener::OpenerExt;
-use crate::utils::tts::{TtsError, ProgressUpdate};
-use crate::utils::tts::tts::{TtsConfig, AudioProcessingConfig, SyncConfig, process_sync};
+use crate::utils::tts::{
+    types::{TtsError, ProgressUpdate, TtsVoiceConfig, AudioProcessingConfig, SyncConfig},
+    synchronize_tts
+};
 use crate::utils::tts::soundtouch;
 use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
 use crate::utils::merge::{self, MergeProgress};
@@ -468,7 +470,7 @@ async fn enhanced_tts_with_logging(
                     let original_audio = Some(Path::new(&audio_path_clone));
                     
                     // Create TTS configuration with sensible defaults
-                    let tts_config = TtsConfig {
+                    let tts_config = TtsVoiceConfig {
                         model: "tts-1-hd".to_string(),
                         voice: "ash".to_string(),
                         speed: 1.0,
@@ -486,12 +488,12 @@ async fn enhanced_tts_with_logging(
                         extra_time_usage_factor: 0.7,
                     };
                     
-                    // Create the sync configuration
+                    // Create the sync configuration using the new structure
                     let sync_config = SyncConfig {
                         api_key: &api_key_clone,
-                        vtt_path,
-                        output_wav: output_wav_path,
-                        original_audio_path: original_audio,
+                        vtt_path: vtt_path.to_str().unwrap_or(""),
+                        output_wav: output_wav_path.to_path_buf(),
+                        original_audio_path: original_audio.map(|p| p.to_str().unwrap_or("")),
                         progress_sender: Some(progress_tx),
                         tts_config,
                         audio_config,
@@ -499,10 +501,10 @@ async fn enhanced_tts_with_logging(
                     
                     // Run the TTS synchronization
                     info!("Starting TTS synchronization with video duration: {:.2}s", video_duration);
-                    match process_sync(sync_config).await {
-                        Ok(()) => {
+                    match synchronize_tts(sync_config).await {
+                        Ok(output_path) => {
                             info!("TTS process completed successfully!");
-                            info!("Generated TTS output file: {}", output_path_clone);
+                            info!("Generated TTS output file: {}", output_path.display());
                             
                             // Verify the generated file exists and has content
                             match tokio::fs::metadata(&output_path_clone).await {

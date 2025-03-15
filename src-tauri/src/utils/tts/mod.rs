@@ -28,4 +28,5 @@ pub use analysis::{SegmentAnalysisConfig, SegmentAnalysisResult, analyze_segment
 mod tests {
     mod test_vtt_parser;
     mod test_openai_tts;
+    mod test_analysis;
 } 
