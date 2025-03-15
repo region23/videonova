@@ -75,7 +75,7 @@ impl Default for SegmentAnalysisConfig {
 /// 
 /// Contains detailed information about the speech rate, severity of timing issues,
 /// and recommended adjustments for the segment.
-#[derive(Debug)]
+#[allow(dead_code)]
 pub struct SegmentAnalysisResult {
     /// Zero-based index of the segment in the original cues array
     pub index: usize,
@@ -146,6 +146,7 @@ pub struct SegmentAnalysisResult {
 ///              results[0].required_speed_factor);
 /// }
 /// ```
+#[allow(dead_code)]
 pub fn analyze_segments(cues: &[SubtitleCue], config: &SegmentAnalysisConfig) -> Vec<SegmentAnalysisResult> {
     let mut results = Vec::with_capacity(cues.len());
     

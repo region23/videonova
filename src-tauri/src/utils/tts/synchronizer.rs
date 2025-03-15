@@ -4,18 +4,13 @@
 //! Объединяет функциональность других модулей, обеспечивая работу полного
 //! цикла от парсинга субтитров до выходного WAV-файла.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 use tokio::sync::mpsc::Sender;
-use log::{info, warn, error};
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
-use anyhow::{Context, Result as AnyhowResult};
+use log::{info, warn};
 
 use crate::utils::tts::types::{
     TtsError, Result, SubtitleCue, AudioFragment, 
-    ProgressUpdate, TtsVoiceConfig, AudioProcessingConfig,
-    SegmentAnalysisConfig, SyncConfig, send_progress
+    ProgressUpdate, SegmentAnalysisConfig, SyncConfig, send_progress
 };
 use crate::utils::tts::vtt;
 use crate::utils::tts::openai_tts;
@@ -301,7 +296,8 @@ impl TtsSynchronizer {
         ).await;
         
         info!("Стандартная пиковая нормализация аудио");
-        audio_processing::normalize_peak(samples, self.config.audio_config.target_peak_level);
+        let normalized = audio_processing::normalize_peak(samples, self.config.audio_config.target_peak_level)?;
+        *samples = normalized;
         
         Ok(())
     }

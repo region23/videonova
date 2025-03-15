@@ -23,6 +23,10 @@ extern "C" {
         static_cast<SoundTouch*>(instance)->setTempo(newTempo);
     }
 
+    void soundtouch_setTempoChange(void* instance, float newTempoChange) {
+        static_cast<SoundTouch*>(instance)->setTempoChange(newTempoChange);
+    }
+
     void soundtouch_setPitch(void* instance, float newPitch) {
         static_cast<SoundTouch*>(instance)->setPitch(newPitch);
     }

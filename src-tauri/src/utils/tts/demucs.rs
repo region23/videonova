@@ -5,9 +5,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use log::{info, warn, error};
+use log::info;
 use tokio::process::Command as TokioCommand;
-use anyhow::Context;
 
 use crate::utils::tts::types::{TtsError, Result};
 
@@ -23,6 +22,7 @@ pub enum DemucsSeparationProgress {
 }
 
 /// Проверка наличия установленной библиотеки Demucs
+#[allow(dead_code)]
 pub fn is_demucs_installed() -> bool {
     let output = Command::new("python3")
         .args(&["-c", "import demucs"])
@@ -35,6 +35,7 @@ pub fn is_demucs_installed() -> bool {
 }
 
 /// Установка библиотеки Demucs и ее зависимостей через pip
+#[allow(dead_code)]
 pub async fn install_demucs() -> Result<()> {
     info!("Установка библиотеки Demucs...");
     
@@ -72,6 +73,7 @@ pub async fn install_demucs() -> Result<()> {
 }
 
 /// Проверка наличия Demucs и установка при необходимости
+#[allow(dead_code)]
 pub async fn ensure_demucs_installed() -> Result<()> {
     if !is_demucs_installed() {
         info!("Demucs не установлен, начинаем установку...");
@@ -93,6 +95,7 @@ pub async fn ensure_demucs_installed() -> Result<()> {
 /// # Возвращает
 /// 
 /// Кортеж путей к файлам с инструменталом и вокалом
+#[allow(dead_code)]
 pub async fn separate_audio<P: AsRef<Path>>(
     input_path: P, 
     output_dir: P,

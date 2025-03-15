@@ -16,13 +16,12 @@ pub mod analysis;
 // Устаревший модуль tts.rs удален, так как его функциональность теперь распределена по модульной архитектуре
 
 // Публично экспортируем основные типы и API для удобства использования
+#[allow(unused_imports)]
 pub use types::{
-    TtsError, Result, SubtitleCue, AudioFragment, ProgressUpdate, 
+    ProgressUpdate, 
     TtsVoiceConfig, AudioProcessingConfig, SyncConfig
 };
 pub use synchronizer::synchronize_tts;
-pub use demucs::separate_audio;
-pub use analysis::{SegmentAnalysisConfig, SegmentAnalysisResult, analyze_segments};
 
 #[cfg(test)]
 mod tests {

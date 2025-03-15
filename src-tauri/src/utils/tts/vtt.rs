@@ -245,7 +245,7 @@ pub fn optimize_time_distribution(
         let extra_time_needed = (needed_duration / 1.8 - current_duration).max(0.0);
         
         if extra_time_needed > 0.0 {
-            let mut borrowed_time = 0.0;
+            let borrowed_time = 0.0;
             
             // Проверяем следующий сегмент, если он существует
             if idx + 1 < cues.len() && free_time_map[idx + 1] > 0.0 {
@@ -259,7 +259,6 @@ pub fn optimize_time_distribution(
                     
                     // Обновляем карту свободного времени
                     free_time_map[idx + 1] -= borrow_amount;
-                    borrowed_time += borrow_amount;
                     
                     info!("Сегмент #{}: заимствовано {:.2}s у следующего сегмента", idx, borrow_amount);
                 }
@@ -279,7 +278,6 @@ pub fn optimize_time_distribution(
                     
                     // Обновляем карту свободного времени
                     free_time_map[idx - 1] -= borrow_amount;
-                    borrowed_time += borrow_amount;
                     
                     info!("Сегмент #{}: заимствовано {:.2}s у предыдущего сегмента", idx, borrow_amount);
                 }

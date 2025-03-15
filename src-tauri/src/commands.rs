@@ -11,11 +11,11 @@ use std::path::Path;
 use tokio_util::sync::CancellationToken;
 use tauri_plugin_opener::OpenerExt;
 use crate::utils::tts::{
-    types::{TtsError, ProgressUpdate, TtsVoiceConfig, AudioProcessingConfig, SyncConfig},
+    types::{ProgressUpdate, TtsVoiceConfig, AudioProcessingConfig, SyncConfig},
     synchronize_tts
 };
 use crate::utils::tts::soundtouch;
-use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
+use crate::utils::common::{check_file_exists_and_valid};
 use crate::utils::merge::{self, MergeProgress};
 use crate::utils::transcribe;
 use crate::utils::translate;
@@ -63,6 +63,7 @@ pub struct MergeResult {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum Step {
     Download { url: String },
     Transcribe,
@@ -221,7 +222,7 @@ pub async fn validate_openai_key(api_key: String) -> Result<bool, String> {
 pub async fn translate_vtt(
     vtt_path: String,
     output_path: String,
-    source_language: String,
+    _source_language: String,
     target_language: String,
     target_language_code: String,
     api_key: String,
@@ -380,8 +381,8 @@ async fn enhanced_tts_with_logging(
                                     (progress, format!("Генерация TTS"), Some(*current as i32), Some(*total as i32))
                                 },
                                 ProgressUpdate::ProcessingFragment { index, total, step } => {
-                                    // Limit detailed step information
-                                    let simplified_step = if step.contains("Удаление вокала") {
+                                    // Упрощаем информацию о шаге для понятного отображения
+                                    let display_step = if step.contains("Удаление вокала") {
                                         "Удаление вокала"
                                     } else if step.contains("Длительность") {
                                         "Обработка аудио"
@@ -389,19 +390,12 @@ async fn enhanced_tts_with_logging(
                                         &step
                                     };
                                     
-                                    // For vocal removal specifically, make it finish at 85%
-                                    let progress = if step.contains("Удаление вокала") {
-                                        // Remap to 50-85%
-                                        50.0 + 35.0 * (*index as f32 / *total as f32)
-                                    } else {
-                                        // Remap all other processing to go from 60% to 90% 
-                                        60.0 + 30.0 * (*index as f32 / *total as f32)
-                                    };
-                                    
-                                    (progress, format!("Обработка аудио"), Some(*index as i32), Some(*total as i32))
+                                    (85.0 + (*index as f32 / *total as f32) * 5.0, 
+                                     format!("{}: {}/{}", display_step, index, total), 
+                                     Some(*index as i32), Some(*total as i32))
                                 },
                                 ProgressUpdate::MergingFragments => (90.0, "Формирование результата".to_string(), None, None),
-                                ProgressUpdate::Normalizing { using_original } => (95.0, "Нормализация громкости".to_string(), None, None),
+                                ProgressUpdate::Normalizing { using_original: _ } => (95.0, "Нормализация громкости".to_string(), None, None),
                                 ProgressUpdate::Encoding => (98.0, "Сохранение результата".to_string(), None, None),
                                 ProgressUpdate::Finished => (100.0, "TTS готов".to_string(), None, None),
                             };
@@ -757,12 +751,12 @@ pub async fn process_video(
 
     // Step 1: Download video
     info!("Step 1: Downloading video");
-    let download_result = match download_video(window.clone(), url.clone(), output_path.clone()).await {
-        Ok(json_result) => {
-            let video_path = json_result["video_path"].as_str()
+    let _download_result = match download_video(window.clone(), url.clone(), output_path.clone()).await {
+        Ok(result) => {
+            let video_path = result["video_path"].as_str()
                 .ok_or_else(|| "Missing video_path in download result".to_string())?
                 .to_string();
-            let audio_path = json_result["audio_path"].as_str()
+            let audio_path = result["audio_path"].as_str()
                 .ok_or_else(|| "Missing audio_path in download result".to_string())?
                 .to_string();
             info!("Download completed successfully");
@@ -779,7 +773,7 @@ pub async fn process_video(
     // Step 2: Transcribe audio
     info!("Step 2: Transcribing audio");
     let transcription_result = match transcribe_audio(
-        download_result.1.clone(), // audio_path
+        _download_result.1.clone(), // audio_path
         output_path.clone(),
         api_key.clone(),
         None, // language - auto detect
@@ -825,8 +819,8 @@ pub async fn process_video(
 
     // Проверяем наличие всех необходимых файлов перед запуском TTS
     for path_str in [
-        &download_result.0, // video_path
-        &download_result.1, // audio_path
+        &_download_result.0, // video_path
+        &_download_result.1, // audio_path
         &transcription_result.vtt_path,
         &translation_result.translated_vtt_path,
     ] {
@@ -848,7 +842,7 @@ pub async fn process_video(
         .map_err(|e| format!("Failed to create TTS directory: {}", e))?;
     
     // Use a filename with correct .wav extension in the tts subdirectory
-    let original_filename = std::path::Path::new(&download_result.0) // video_path
+    let original_filename = std::path::Path::new(&_download_result.0) // video_path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "video".to_string());
@@ -858,8 +852,8 @@ pub async fn process_video(
     info!("TTS output will be saved to: {}", tts_output.display());
 
     let tts_result = generate_speech(
-        download_result.0.clone(), // video_path
-        download_result.1.clone(), // audio_path
+        _download_result.0.clone(), // video_path
+        _download_result.1.clone(), // audio_path
         transcription_result.vtt_path.clone(),
         translation_result.translated_vtt_path.clone(),
         tts_output.to_string_lossy().to_string(),
@@ -874,9 +868,9 @@ pub async fn process_video(
 
     // We need to determine source language code from transcription
     let merge_result = merge_video(
-        download_result.0.clone(), // video_path
+        _download_result.0.clone(), // video_path
         tts_result.audio_path.clone(), // Use the TTS result as the translated audio
-        download_result.1.clone(), // audio_path
+        _download_result.1.clone(), // audio_path
         transcription_result.vtt_path.clone(),
         translation_result.translated_vtt_path.clone(),
         output_path.clone(), // Use the user-selected output directory directly
@@ -912,8 +906,8 @@ pub async fn process_video(
     }
 
     Ok(ProcessVideoResult {
-        video_path: download_result.0, // video_path
-        audio_path: download_result.1, // audio_path
+        video_path: _download_result.0, // video_path
+        audio_path: _download_result.1, // audio_path
         transcription_path: transcription_result.vtt_path,
         translation_path: translation_result.translated_vtt_path,
         tts_path: tts_result.audio_path,
@@ -1010,6 +1004,7 @@ pub async fn merge_video(
     })
 }
 
+#[allow(dead_code)]
 async fn process_steps(
     steps: Vec<Step>,
     output_path: PathBuf,
@@ -1019,7 +1014,7 @@ async fn process_steps(
         match step {
             Step::Download { url } => {
                 info!("Step 1: Downloading video");
-                let download_result = match download_video(window.clone(), url.clone(), output_path.to_string_lossy().to_string()).await {
+                let _download_result = match download_video(window.clone(), url.clone(), output_path.to_string_lossy().to_string()).await {
                     Ok(result) => {
                         info!("Download completed successfully");
                         result
@@ -1061,7 +1056,7 @@ pub async fn cleanup_temp_files(final_video_path: String, output_dir: String) ->
     }
 
     // Get the filename from the final video path
-    let final_video_name = std::path::Path::new(&final_video_path)
+    let _final_video_name = std::path::Path::new(&final_video_path)
         .file_name()
         .ok_or("Failed to get video filename")?
         .to_str()

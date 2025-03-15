@@ -6,7 +6,7 @@
 
 use reqwest::{Client, header};
 use serde_json::{json, Value};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use log::{info, warn, error};
 use std::time::Duration;
 use std::collections::HashMap;
@@ -185,6 +185,7 @@ fn preprocess_text(text: &str) -> String {
 }
 
 /// Возвращает список доступных голосов TTS.
+#[allow(dead_code)]
 pub fn available_voices() -> Vec<String> {
     vec![
         "alloy".to_string(),
@@ -197,6 +198,7 @@ pub fn available_voices() -> Vec<String> {
 }
 
 /// Возвращает список доступных моделей TTS.
+#[allow(dead_code)]
 pub fn available_models() -> Vec<String> {
     vec![
         "tts-1".to_string(),

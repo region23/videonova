@@ -273,7 +273,7 @@ fn stretch_with_rubato(input: &[f32], ratio: f32, sample_rate: u32) -> Result<Ve
         };
         
         // Подготавливаем входные данные для текущего блока
-        let mut current_frames = vec![current_chunk];
+        let current_frames = vec![current_chunk];
         
         // Обрабатываем блок
         let output_frames = resampler.process(&current_frames, None)
@@ -394,6 +394,7 @@ pub fn apply_fade(samples: &mut [f32], fade_ms: u32, sample_rate: u32) {
 /// // Использование только одной дорожки
 /// let mixed = mix_audio_tracks(&vocals, &background, 1.0, 0.0)?; // только голос
 /// ```
+#[allow(dead_code)]
 pub fn mix_audio_tracks(track1: &[f32], track2: &[f32], volume1: f32, volume2: f32) -> Result<Vec<f32>> {
     if track1.is_empty() {
         return Ok(track2.to_vec());
@@ -549,6 +550,7 @@ pub fn normalize_rms(samples: &mut [f32], target_rms: f32) -> bool {
 /// # Возвращает
 /// 
 /// Объединенные PCM-семплы
+#[allow(dead_code)]
 pub fn crossfade_fragments(
     first: &[f32],
     second: &[f32],

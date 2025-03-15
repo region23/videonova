@@ -25,13 +25,12 @@
 use std::path::Path;
 use std::fs::File;
 use std::io::Read;
-use log::{info, warn, error};
+use log::{info, warn};
 use hound::{WavReader, WavWriter, WavSpec, SampleFormat};
-use symphonia::core::audio::{SampleBuffer, Signal};
+use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 use crate::utils::tts::types::{TtsError, Result};
@@ -53,6 +52,7 @@ use crate::utils::tts::types::{TtsError, Result};
 /// let duration = duration_in_seconds(44100, 44100); // 1.0 секунда
 /// let duration = duration_in_seconds(88200, 44100); // 2.0 секунды
 /// ```
+#[allow(dead_code)]
 pub fn duration_in_seconds(sample_count: usize, sample_rate: u32) -> f32 {
     sample_count as f32 / sample_rate as f32
 }

@@ -5,9 +5,7 @@
 //! без ухудшения качества.
 
 use std::process::Command;
-use std::path::Path;
-use log::{info, warn, error};
-use anyhow::Context;
+use log::info;
 
 use crate::utils::tts::types::{TtsError, Result};
 
@@ -17,13 +15,14 @@ pub struct SoundTouch {
     _private: [u8; 0],
 }
 
+#[allow(unused_doc_comments)]
 /// FFI-обёртки для библиотеки SoundTouch.
 unsafe extern "C" {
     pub fn soundtouch_createInstance() -> *mut SoundTouch;
     pub fn soundtouch_destroyInstance(instance: *mut SoundTouch);
     pub fn soundtouch_setSampleRate(instance: *mut SoundTouch, srate: u32);
     pub fn soundtouch_setChannels(instance: *mut SoundTouch, numChannels: u32);
-    pub fn soundtouch_setTempo(instance: *mut SoundTouch, newTempo: f32);
+    pub fn soundtouch_setTempoChange(instance: *mut SoundTouch, newTempo: f32);
     pub fn soundtouch_setPitch(instance: *mut SoundTouch, newPitch: f32);
     pub fn soundtouch_putSamples(instance: *mut SoundTouch, samples: *const f32, numSamples: u32);
     pub fn soundtouch_receiveSamples(instance: *mut SoundTouch, outBuffer: *mut f32, maxSamples: u32) -> u32;
@@ -180,7 +179,7 @@ pub fn process_with_soundtouch(input: &[f32], sample_rate: u32, tempo: f32) -> R
         soundtouch_setSampleRate(instance, sample_rate);
         soundtouch_setChannels(instance, 1);
         // Устанавливаем темп (tempo factor) — изменение длительности без изменения pitch.
-        soundtouch_setTempo(instance, tempo);
+        soundtouch_setTempoChange(instance, tempo);
         // Гарантируем, что тон остаётся неизменным.
         soundtouch_setPitch(instance, 1.0);
         // Передаём сэмплы.

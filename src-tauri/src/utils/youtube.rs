@@ -170,7 +170,7 @@ pub async fn download_video(
     url: &str,
     output_dir: &PathBuf,
     progress_sender: Option<mpsc::Sender<DownloadProgress>>,
-    cancellation_token: CancellationToken,
+    _cancellation_token: CancellationToken,
     window: &tauri::Window,
 ) -> Result<DownloadResult> {
     info!("Starting video download process for URL: {}", url);
