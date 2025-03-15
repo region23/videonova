@@ -12,6 +12,7 @@ pub mod audio_format;
 pub mod audio_processing;
 pub mod synchronizer;
 pub mod demucs;
+pub mod analysis;
 pub mod tts;  // Пока оставляем оригинальный файл
 
 // Публично экспортируем основные типы и API для удобства использования
@@ -21,6 +22,7 @@ pub use types::{
 };
 pub use synchronizer::synchronize_tts;
 pub use demucs::separate_audio;
+pub use analysis::{SegmentAnalysisConfig, SegmentAnalysisResult, analyze_segments};
 
 #[cfg(test)]
 mod tests {

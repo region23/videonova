@@ -11,6 +11,17 @@ use anyhow::Context;
 
 use crate::utils::tts::types::{TtsError, Result};
 
+/// Перечисление для отслеживания прогресса разделения аудио с помощью Demucs
+#[derive(Debug, Clone)]
+pub enum DemucsSeparationProgress {
+    Started,
+    LoadingModel,
+    Processing { progress: f32 },
+    Converting,
+    Finished,
+    Error(String),
+}
+
 /// Проверка наличия установленной библиотеки Demucs
 pub fn is_demucs_installed() -> bool {
     let output = Command::new("python3")
