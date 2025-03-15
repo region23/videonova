@@ -10,13 +10,14 @@ use serde_json::json;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 use tauri_plugin_opener::OpenerExt;
-use crate::utils::tts::tts::{synchronizer::{SyncConfig, process_sync}, ProgressUpdate, TtsConfig, AudioProcessingConfig};
+use crate::utils::tts::{TtsError, ProgressUpdate};
+use crate::utils::tts::tts::{TtsConfig, AudioProcessingConfig, SyncConfig, process_sync};
+use crate::utils::tts::soundtouch;
 use crate::utils::common::{sanitize_filename, check_file_exists_and_valid};
 use crate::utils::merge::{self, MergeProgress};
 use crate::utils::transcribe;
 use crate::utils::translate;
 use crate::utils::youtube::{self, DownloadProgress, VideoInfo};
-use crate::utils::tts::tts::soundtouch;
 
 #[derive(Clone, Serialize)]
 pub struct DownloadState {
@@ -371,7 +372,6 @@ async fn enhanced_tts_with_logging(
                             let (progress, status, current, total) = match &update {
                                 ProgressUpdate::Started => (0.0, "Подготовка TTS".to_string(), None, None),
                                 ProgressUpdate::ParsingVTT => (5.0, "Анализ субтитров".to_string(), None, None),
-                                ProgressUpdate::ParsedVTT { total } => (10.0, "Субтитры готовы".to_string(), None, Some(*total as i32)),
                                 ProgressUpdate::TTSGeneration { current, total } => {
                                     // Reduce the TTS generation range to leave room for vocal removal and mixing
                                     let progress = 10.0 + 40.0 * (*current as f32 / *total as f32);
@@ -476,11 +476,14 @@ async fn enhanced_tts_with_logging(
                     
                     // Create audio processing configuration with sensible defaults
                     let audio_config = AudioProcessingConfig {
-                        window_size: 512,
-                        hop_size: 256,
                         target_peak_level: 0.8,
                         voice_to_instrumental_ratio: 0.6,
                         instrumental_boost: 1.5,
+                        max_rubato_speed: 2.5,
+                        min_rubato_speed: 0.5,
+                        max_soundtouch_speed: 2.0,
+                        min_soundtouch_speed: 0.5,
+                        extra_time_usage_factor: 0.7,
                     };
                     
                     // Create the sync configuration
