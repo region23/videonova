@@ -8,7 +8,7 @@
 
 ```rust
 use crate::utils::tts::{
-    TtsVoiceConfig, AudioProcessingConfig, SyncConfig, synchronize_tts
+    SyncConfig, TtsVoiceConfig, AudioProcessingConfig, synchronize_tts
 };
 use std::path::PathBuf;
 
@@ -32,6 +32,7 @@ async fn generate_speech(
         audio_config,
         original_audio_path: None,
         progress_sender: None,
+        debug_dir: None,
     };
     
     // 4. Вызываем функцию генерации TTS
@@ -47,7 +48,7 @@ async fn generate_speech(
 
 ```rust
 use crate::utils::tts::{
-    TtsVoiceConfig, AudioProcessingConfig, SyncConfig, synchronize_tts
+    SyncConfig, TtsVoiceConfig, AudioProcessingConfig, synchronize_tts
 };
 use std::path::PathBuf;
 
@@ -84,6 +85,7 @@ async fn generate_custom_speech(
         audio_config,
         original_audio_path: None,
         progress_sender: None,
+        debug_dir: None,
     };
     
     // 4. Вызываем функцию генерации TTS
@@ -99,7 +101,7 @@ async fn generate_custom_speech(
 
 ```rust
 use crate::utils::tts::{
-    TtsVoiceConfig, AudioProcessingConfig, SyncConfig, synchronize_tts
+    SyncConfig, TtsVoiceConfig, AudioProcessingConfig, synchronize_tts
 };
 use std::path::PathBuf;
 
@@ -118,6 +120,7 @@ async fn generate_synced_speech(
         audio_config: AudioProcessingConfig::default(),
         original_audio_path: Some(original_audio_path),
         progress_sender: None,
+        debug_dir: None,
     };
     
     // 2. Вызываем функцию генерации TTS
@@ -133,7 +136,7 @@ async fn generate_synced_speech(
 
 ```rust
 use crate::utils::tts::{
-    TtsVoiceConfig, AudioProcessingConfig, SyncConfig, synchronize_tts,
+    SyncConfig, TtsVoiceConfig, AudioProcessingConfig, synchronize_tts,
     ProgressUpdate
 };
 use std::path::PathBuf;
@@ -179,6 +182,9 @@ async fn generate_speech_with_progress(
                 ProgressUpdate::Finished => {
                     println!("Генерация TTS завершена");
                 },
+                ProgressUpdate::Error(err) => {
+                    println!("Ошибка: {}", err);
+                },
             }
         }
     });
@@ -192,6 +198,7 @@ async fn generate_speech_with_progress(
         audio_config: AudioProcessingConfig::default(),
         original_audio_path: None,
         progress_sender: Some(tx),
+        debug_dir: None,
     };
     
     // 4. Вызываем функцию генерации TTS
@@ -212,7 +219,7 @@ async fn generate_speech_with_progress(
 
 ```rust
 use crate::utils::tts::{
-    TtsVoiceConfig, AudioProcessingConfig, SyncConfig, synchronize_tts,
+    SyncConfig, TtsVoiceConfig, AudioProcessingConfig, synchronize_tts,
     TtsError
 };
 use std::path::PathBuf;
@@ -231,6 +238,7 @@ async fn generate_speech_with_error_handling(
         audio_config: AudioProcessingConfig::default(),
         original_audio_path: None,
         progress_sender: None,
+        debug_dir: None,
     };
     
     // 2. Вызываем функцию с обработкой различных типов ошибок
@@ -241,7 +249,7 @@ async fn generate_speech_with_error_handling(
             Err(format!("Ошибка при парсинге VTT-файла: {}", msg))
         },
         
-        Err(TtsError::OpenAiApiError(msg)) => {
+        Err(TtsError::OpenAIApiError(msg)) => {
             Err(format!("Ошибка OpenAI API: {}", msg))
         },
         
@@ -278,7 +286,7 @@ async fn generate_speech_with_error_handling(
 
 ## 6. Удаление вокала из аудио
 
-Пример использования Demucs для удаления вокала:
+Пример использования функции разделения аудио:
 
 ```rust
 use crate::utils::tts::separate_audio;
@@ -345,63 +353,9 @@ async fn analyze_subtitle_segments(vtt_path: &str) -> Result<(), String> {
 }
 ```
 
-## 8. Миграция со старого API на новый
-
-Пример миграции со старого API на новый:
-
-```rust
-// Старый код
-use crate::utils::tts::tts::{SyncConfig, TtsConfig, process_sync};
-
-async fn old_generate_tts(
-    api_key: &str,
-    vtt_path: &std::path::Path,
-    output_wav: &std::path::Path
-) -> Result<(), String> {
-    // Создаем конфигурацию старого формата
-    let config = SyncConfig::new(
-        api_key, 
-        vtt_path, 
-        output_wav
-    );
-    
-    // Вызываем старую функцию
-    process_sync(config)
-        .await
-        .map_err(|e| format!("Ошибка генерации TTS: {:?}", e))
-}
-
-// Новый код
-use crate::utils::tts::{
-    TtsVoiceConfig, AudioProcessingConfig, SyncConfig, synchronize_tts
-};
-
-async fn new_generate_tts(
-    api_key: &str,
-    vtt_path: &str,
-    output_wav: &std::path::Path
-) -> Result<std::path::PathBuf, String> {
-    // Создаем конфигурацию нового формата
-    let config = SyncConfig {
-        vtt_path,
-        output_wav: output_wav.to_path_buf(),
-        api_key,
-        tts_config: TtsVoiceConfig::default(),
-        audio_config: AudioProcessingConfig::default(),
-        original_audio_path: None,
-        progress_sender: None,
-    };
-    
-    // Вызываем новую функцию
-    synchronize_tts(config)
-        .await
-        .map_err(|e| format!("Ошибка генерации TTS: {:?}", e))
-}
-```
-
 ## Заключение
 
-При использовании нового модульного API TTS системы рекомендуется:
+При использовании модульного API TTS системы рекомендуется:
 
 1. Работать напрямую с конкретными модулями для специфической функциональности
 2. Использовать `synchronize_tts` для полного процесса генерации TTS

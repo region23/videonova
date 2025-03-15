@@ -13,7 +13,7 @@ pub mod audio_processing;
 pub mod synchronizer;
 pub mod demucs;
 pub mod analysis;
-pub mod tts;  // Пока оставляем оригинальный файл
+// Устаревший модуль tts.rs удален, так как его функциональность теперь распределена по модульной архитектуре
 
 // Публично экспортируем основные типы и API для удобства использования
 pub use types::{
