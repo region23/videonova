@@ -173,6 +173,273 @@ pub fn decode_mp3(mp3_data: &[u8]) -> Result<(Vec<f32>, u32)> {
     Ok((pcm_data, sample_rate))
 }
 
+/// Декодирует аудиофайл разных форматов в PCM семплы, сохраняя информацию о каналах.
+/// 
+/// В отличие от функции decode_audio_file, эта функция не сводит многоканальное аудио в моно,
+/// а сохраняет оригинальное количество каналов.
+/// 
+/// # Аргументы
+/// 
+/// * `file_path` - Путь к аудиофайлу
+/// 
+/// # Возвращает
+/// 
+/// Кортеж из вектора с PCM-семплами (f32), частоты дискретизации (u32) и количества каналов (u32)
+/// 
+/// # Примеры
+/// 
+/// ```rust
+/// // Декодирование стерео-файла без сведения в моно
+/// let (samples, sample_rate, channels) = decode_audio_file_with_channels("stereo.wav")?;
+/// assert_eq!(channels, 2);
+/// ```
+pub fn decode_audio_file_with_channels<P: AsRef<Path>>(file_path: P) -> Result<(Vec<f32>, u32, u32)> {
+    let file_path = file_path.as_ref();
+    
+    // Проверяем существование файла перед обработкой
+    if !file_path.exists() {
+        return Err(TtsError::AudioProcessingError(
+            format!("Файл не существует: {}", file_path.display())
+        ));
+    }
+    
+    // Проверяем размер файла
+    let metadata = match std::fs::metadata(file_path) {
+        Ok(metadata) => metadata,
+        Err(e) => return Err(TtsError::IoError(e)),
+    };
+    
+    if metadata.len() == 0 {
+        return Err(TtsError::AudioProcessingError(
+            format!("Файл пуст: {}", file_path.display())
+        ));
+    }
+    
+    let extension = file_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    
+    info!("Декодирование аудиофайла: {}, формат: {}, размер: {} байт", 
+          file_path.display(), extension, metadata.len());
+    
+    // Открываем файл
+    let mut file = match File::open(file_path) {
+        Ok(file) => file,
+        Err(e) => return Err(TtsError::IoError(e)),
+    };
+    
+    match extension.as_str() {
+        "wav" => {
+            // Для WAV файлов используем специальный декодер
+            let wav_reader_result = WavReader::open(file_path);
+            
+            match wav_reader_result {
+                Ok(mut reader) => {
+                    let spec = reader.spec();
+                    let sample_rate = spec.sample_rate;
+                    let channels = spec.channels;
+                    
+                    // Читаем данные в зависимости от формата
+                    let pcm_data: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
+                        (SampleFormat::Int, 16) => {
+                            reader.samples::<i16>()
+                                .map(|s| s.map_err(|e| TtsError::WavDecodingError(e)))
+                                .collect::<Result<Vec<i16>>>()?
+                                .into_iter()
+                                .map(|s| s as f32 / 32768.0)
+                                .collect()
+                        },
+                        (SampleFormat::Int, 24) => {
+                            reader.samples::<i32>()
+                                .map(|s| s.map_err(|e| TtsError::WavDecodingError(e)))
+                                .collect::<Result<Vec<i32>>>()?
+                                .into_iter()
+                                .map(|s| s as f32 / 8388608.0)
+                                .collect()
+                        },
+                        (SampleFormat::Int, 32) => {
+                            reader.samples::<i32>()
+                                .map(|s| s.map_err(|e| TtsError::WavDecodingError(e)))
+                                .collect::<Result<Vec<i32>>>()?
+                                .into_iter()
+                                .map(|s| s as f32 / 2147483648.0)
+                                .collect()
+                        },
+                        (SampleFormat::Float, 32) => {
+                            reader.samples::<f32>()
+                                .map(|s| s.map_err(|e| TtsError::WavDecodingError(e)))
+                                .collect::<Result<Vec<f32>>>()?
+                        },
+                        _ => {
+                            return Err(TtsError::AudioProcessingError(
+                                format!(
+                                    "Неподдерживаемый формат WAV: {:?}, {} бит", 
+                                    spec.sample_format, 
+                                    spec.bits_per_sample
+                                )
+                            ));
+                        }
+                    };
+                    
+                    if pcm_data.is_empty() {
+                        warn!("Декодированы пустые PCM данные из файла {}", file_path.display());
+                        return Err(TtsError::AudioProcessingError(
+                            format!("Файл не содержит аудио данных: {}", file_path.display())
+                        ));
+                    }
+                    
+                    info!("Декодировано {} семплов из файла {} с частотой {}Hz, {} каналов", 
+                          pcm_data.len(), file_path.display(), sample_rate, channels);
+                    
+                    Ok((pcm_data, sample_rate, channels as u32))
+                },
+                Err(e) => {
+                    warn!("Ошибка при открытии WAV файла {}: {}", file_path.display(), e);
+                    Err(TtsError::WavDecodingError(e))
+                }
+            }
+        },
+        
+        "mp3" | "m4a" | "aac" | "flac" | "ogg" => {
+            // Читаем весь файл в память
+            let mut buffer = Vec::new();
+            match file.read_to_end(&mut buffer) {
+                Ok(bytes_read) => {
+                    if bytes_read == 0 {
+                        warn!("Файл пуст: {}", file_path.display());
+                        return Err(TtsError::AudioProcessingError(
+                            format!("Файл не содержит данных: {}", file_path.display())
+                        ));
+                    }
+                    info!("Прочитано {} байт из файла {}", bytes_read, file_path.display());
+                },
+                Err(e) => return Err(TtsError::IoError(e)),
+            }
+            
+            // Используем symphonia для декодирования
+            let cursor = std::io::Cursor::new(buffer);
+            
+            // Создаем источник данных
+            let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+            
+            // Создаем подсказку для формата
+            let mut hint = Hint::new();
+            hint.with_extension(&extension);
+            
+            // Пробуем распознать формат
+            let probed = match symphonia::default::get_probe()
+                .format(&hint, mss, &Default::default(), &Default::default()) {
+                Ok(probed) => probed,
+                Err(e) => {
+                    warn!("Ошибка при определении формата аудио {}: {}", file_path.display(), e);
+                    return Err(TtsError::AudioProcessingError(
+                        format!("Не удалось определить формат аудио: {}", e)
+                    ));
+                }
+            };
+            
+            // Получаем формат и первый аудио-трек
+            let mut format = probed.format;
+            let track = match format
+                .tracks()
+                .iter()
+                .find(|t| t.codec_params.codec != CODEC_TYPE_NULL) {
+                Some(track) => track,
+                None => {
+                    warn!("Не найден аудио-трек в файле {}", file_path.display());
+                    return Err(TtsError::AudioProcessingError(
+                        format!("Не найден аудио-трек в файле {}", file_path.display())
+                    ));
+                }
+            };
+            
+            // Создаем декодер для трека
+            let mut decoder = match symphonia::default::get_codecs()
+                .make(&track.codec_params, &Default::default()) {
+                Ok(decoder) => decoder,
+                Err(e) => {
+                    warn!("Ошибка при создании декодера для {}: {}", file_path.display(), e);
+                    return Err(TtsError::AudioProcessingError(
+                        format!("Не удалось создать декодер: {}", e)
+                    ));
+                }
+            };
+            
+            // Получаем параметры аудио
+            let track_id = track.id;
+            let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
+            let channels_count = track.codec_params.channels.unwrap_or_default().count();
+            
+            // Готовим буфер для семплов
+            let mut pcm_data = Vec::new();
+            
+            // Флаг для отслеживания декодирования хотя бы одного пакета
+            let mut decoded_any_packet = false;
+            
+            // Декодируем пакеты
+            while let Ok(packet) = format.next_packet() {
+                // Пропускаем пакеты, не относящиеся к нашему треку
+                if packet.track_id() != track_id {
+                    continue;
+                }
+                
+                // Декодируем пакет
+                match decoder.decode(&packet) {
+                    Ok(decoded) => {
+                        // Отмечаем, что декодировали хотя бы один пакет
+                        decoded_any_packet = true;
+                        
+                        // Создаем буфер для семплов
+                        let mut sample_buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+                        
+                        // Наполняем буфер семплами
+                        sample_buf.copy_planar_ref(decoded);
+                        
+                        // Получаем все семплы как срез
+                        let samples = sample_buf.samples();
+                        
+                        // Добавляем все семплы, сохраняя оригинальное количество каналов
+                        pcm_data.extend_from_slice(samples);
+                    },
+                    Err(e) => {
+                        warn!("Ошибка декодирования пакета из {}: {}", file_path.display(), e);
+                        // Пропускаем проблемный пакет и продолжаем
+                        continue;
+                    }
+                }
+            }
+            
+            // Проверяем, были ли декодированы какие-либо пакеты
+            if !decoded_any_packet {
+                warn!("Не удалось декодировать ни одного пакета из файла {}", file_path.display());
+                return Err(TtsError::AudioProcessingError(
+                    format!("Не удалось декодировать аудио данные из {}", file_path.display())
+                ));
+            }
+            
+            // Проверяем, не пуст ли результат
+            if pcm_data.is_empty() {
+                warn!("Декодированные PCM данные пусты для файла {}", file_path.display());
+                return Err(TtsError::AudioProcessingError(
+                    format!("Декодированный файл не содержит аудио данных: {}", file_path.display())
+                ));
+            }
+            
+            info!("Декодировано {} семплов из файла {} с частотой {}Hz, {} каналов", 
+                  pcm_data.len(), file_path.display(), sample_rate, channels_count);
+            
+            Ok((pcm_data, sample_rate, channels_count as u32))
+        },
+        
+        _ => {
+            warn!("Неподдерживаемый формат аудио: {} (файл: {})", extension, file_path.display());
+            Err(TtsError::AudioProcessingError(format!("Неподдерживаемый формат аудио: {}", extension)))
+        }
+    }
+}
+
 /// Декодирует аудиофайл разных форматов в PCM семплы.
 /// 
 /// Поддерживает форматы:
@@ -405,44 +672,22 @@ pub fn decode_wav_file<P: AsRef<Path>>(file_path: P) -> Result<(Vec<f32>, u32)> 
 /// 
 /// Записывает несжатые аудио данные в WAV-файл с заданной частотой дискретизации.
 /// Использует формат 32-бит с плавающей точкой для максимального качества.
+/// Поддерживает как моно, так и стерео аудио.
 /// 
 /// # Аргументы
 /// 
 /// * `pcm_data` - Вектор PCM семплов в формате f32 (диапазон [-1.0, 1.0])
 /// * `sample_rate` - Частота дискретизации в Гц
+/// * `channels` - Количество аудиоканалов (1 для моно, 2 для стерео)
 /// * `output_path` - Путь для сохранения WAV-файла
 /// 
 /// # Возвращает
 /// 
 /// Ok(()) при успешном сохранении, иначе ошибку TtsError
-/// 
-/// # Ошибки
-/// 
-/// Возвращает ошибку TtsError::WavEncodingError если:
-/// * Не удалось создать выходной файл
-/// * Произошла ошибка при записи WAV-заголовка
-/// * Произошла ошибка при записи семплов
-/// 
-/// # Примеры
-/// 
-/// ```rust
-/// // Создание синусоидального сигнала 440Гц
-/// let sample_rate = 44100;
-/// let duration = 2.0; // 2 секунды
-/// let mut samples = Vec::with_capacity((sample_rate as f32 * duration) as usize);
-/// 
-/// for i in 0..(sample_rate as f32 * duration) as usize {
-///     let t = i as f32 / sample_rate as f32;
-///     samples.push((t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.5);
-/// }
-/// 
-/// // Сохранение в WAV
-/// encode_wav(&samples, sample_rate, "sine_440hz.wav")?;
-/// ```
-pub fn encode_wav(pcm_data: &[f32], sample_rate: u32, output_path: &str) -> Result<()> {
+pub fn encode_wav_multi_channel(pcm_data: &[f32], sample_rate: u32, channels: u16, output_path: &str) -> Result<()> {
     // Создаем спецификацию WAV-файла
     let spec = WavSpec {
-        channels: 1,
+        channels: channels,
         sample_rate,
         bits_per_sample: 32,
         sample_format: SampleFormat::Float,
@@ -462,8 +707,29 @@ pub fn encode_wav(pcm_data: &[f32], sample_rate: u32, output_path: &str) -> Resu
     writer.finalize()
         .map_err(|e| TtsError::WavEncodingError(e))?;
     
-    info!("Сохранен WAV-файл: {} ({} семплов, {} Гц)", output_path, pcm_data.len(), sample_rate);
+    info!("Сохранен WAV-файл: {} ({} семплов, {} каналов, {} Гц)", 
+          output_path, pcm_data.len(), channels, sample_rate);
     Ok(())
+}
+
+/// Кодирует PCM семплы в WAV-файл.
+/// 
+/// Записывает несжатые аудио данные в WAV-файл с заданной частотой дискретизации.
+/// Использует формат 32-бит с плавающей точкой для максимального качества.
+/// 
+/// Это обертка вокруг encode_wav_multi_channel для обратной совместимости.
+/// 
+/// # Аргументы
+/// 
+/// * `pcm_data` - Вектор PCM семплов в формате f32 (диапазон [-1.0, 1.0])
+/// * `sample_rate` - Частота дискретизации в Гц
+/// * `output_path` - Путь для сохранения WAV-файла
+/// 
+/// # Возвращает
+/// 
+/// Ok(()) при успешном сохранении, иначе ошибку TtsError
+pub fn encode_wav(pcm_data: &[f32], sample_rate: u32, output_path: &str) -> Result<()> {
+    encode_wav_multi_channel(pcm_data, sample_rate, 1, output_path)
 }
 
 /// Вычисляет среднеквадратичное значение (RMS) для массива семплов.

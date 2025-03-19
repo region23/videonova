@@ -218,15 +218,31 @@ fn stretch_with_rubato(input: &[f32], ratio: f32, sample_rate: u32) -> Result<Ve
     
     // Определяем размер блока в зависимости от длительности
     let duration_seconds = input.len() as f32 / sample_rate as f32;
+    
+    // Минимальный размер блока для Rubato - 64
+    // Устанавливаем размер блока так, чтобы он был достаточным для обработки коротких фрагментов
     let block_size = if duration_seconds < 0.1 {
-        64 // Очень короткие фрагменты
+        // Для очень коротких фрагментов используем минимальный безопасный размер
+        64
     } else if duration_seconds < 0.5 {
-        128 // Короткие фрагменты
+        // Для коротких фрагментов
+        128
     } else if duration_seconds < 2.0 {
-        256 // Средние фрагменты
+        // Для средних фрагментов
+        256
     } else {
-        512 // Длинные фрагменты
+        // Для длинных фрагментов
+        512
     };
+    
+    // Если входные данные короче минимального размера блока, применяем паддинг сразу
+    if input.len() < block_size {
+        info!("Входной аудиофрагмент слишком короткий ({}), применяем паддинг до {} сэмплов", 
+              input.len(), block_size);
+        let mut padded_input = vec![0.0; block_size];
+        padded_input[..input.len()].copy_from_slice(input);
+        return stretch_padded_audio(&padded_input, ratio, sample_rate, block_size);
+    }
     
     // Параметры sinc-интерполяции для высокого качества
     let params = SincInterpolationParameters {
@@ -246,10 +262,6 @@ fn stretch_with_rubato(input: &[f32], ratio: f32, sample_rate: u32) -> Result<Ve
         1 // моно
     ).map_err(|e| TtsError::TimeStretchingError(format!("Ошибка инициализации Rubato: {}", e)))?;
     
-    // Подготавливаем входные данные
-    let mut input_frames = vec![Vec::new()];
-    input_frames[0].extend_from_slice(input);
-    
     // Предварительно выделяем память для выходных данных
     let output_size = (input.len() as f32 * ratio) as usize;
     let mut output_buf = vec![0.0; output_size + block_size * 2]; // с запасом
@@ -258,15 +270,32 @@ fn stretch_with_rubato(input: &[f32], ratio: f32, sample_rate: u32) -> Result<Ve
     // Обработка блоками
     let mut idx = 0;
     while idx < input.len() {
-        let chunk_size = cmp::min(block_size, input.len() - idx);
+        let remaining = input.len() - idx;
+        let chunk_size = cmp::min(block_size, remaining);
+        
         if chunk_size == 0 {
             break;
         }
         
-        // Если у нас последний блок и он слишком мал, используем padding
-        let current_chunk = if chunk_size < block_size / 4 && idx > 0 {
+        // Проверяем, является ли это последним блоком и требуется ли паддинг
+        let current_chunk = if chunk_size < block_size {
+            // Если оставшийся кусок меньше размера блока, добавляем паддинг
             let mut padded = vec![0.0; block_size];
             padded[..chunk_size].copy_from_slice(&input[idx..idx+chunk_size]);
+            
+            // Если это последний блок и он меньше половины размера блока,
+            // плавно затухаем его для избежания артефактов
+            if idx + chunk_size == input.len() && chunk_size < block_size / 2 {
+                // Применяем затухание к концу фрагмента
+                let fade_length = chunk_size / 2;
+                if fade_length > 0 {
+                    for i in 0..fade_length {
+                        let factor = 1.0 - (i as f32 / fade_length as f32);
+                        padded[chunk_size - fade_length + i] *= factor;
+                    }
+                }
+            }
+            
             padded
         } else {
             input[idx..idx+chunk_size].to_vec()
@@ -276,20 +305,26 @@ fn stretch_with_rubato(input: &[f32], ratio: f32, sample_rate: u32) -> Result<Ve
         let current_frames = vec![current_chunk];
         
         // Обрабатываем блок
-        let output_frames = resampler.process(&current_frames, None)
-            .map_err(|e| TtsError::TimeStretchingError(format!("Ошибка в процессе ресемплинга: {}", e)))?;
-        
-        // Копируем результат
-        let output_len = output_frames[0].len();
-        if total_output + output_len <= output_buf.len() {
-            output_buf[total_output..total_output+output_len].copy_from_slice(&output_frames[0]);
-            total_output += output_len;
-        } else {
-            return Err(TtsError::TimeStretchingError(
-                format!("Переполнение выходного буфера при ресемплинге: {} + {} > {}", 
-                    total_output, output_len, output_buf.len()
-                )
-            ));
+        match resampler.process(&current_frames, None) {
+            Ok(output_frames) => {
+                // Копируем результат
+                let output_len = output_frames[0].len();
+                if total_output + output_len <= output_buf.len() {
+                    output_buf[total_output..total_output+output_len].copy_from_slice(&output_frames[0]);
+                    total_output += output_len;
+                } else {
+                    return Err(TtsError::TimeStretchingError(
+                        format!("Переполнение выходного буфера при ресемплинге: {} + {} > {}", 
+                            total_output, output_len, output_buf.len()
+                        )
+                    ));
+                }
+            },
+            Err(e) => {
+                // Если произошла ошибка, логируем её и пробуем обработать весь входной массив сразу
+                warn!("Ошибка при обработке блока Rubato: {}. Пробуем обработать весь фрагмент сразу.", e);
+                return stretch_padded_audio(input, ratio, sample_rate, block_size);
+            }
         }
         
         idx += chunk_size;
@@ -299,6 +334,47 @@ fn stretch_with_rubato(input: &[f32], ratio: f32, sample_rate: u32) -> Result<Ve
     output_buf.truncate(total_output);
     
     Ok(output_buf)
+}
+
+/// Вспомогательная функция для обработки очень короткого аудио путем добавления паддинга
+/// и последующего вырезания только нужной части результата.
+fn stretch_padded_audio(input: &[f32], ratio: f32, sample_rate: u32, block_size: usize) -> Result<Vec<f32>> {
+    // Создаем падированный входной массив, кратный размеру блока
+    let padded_size = ((input.len() + block_size - 1) / block_size) * block_size;
+    let mut padded_input = vec![0.0; padded_size];
+    padded_input[..input.len()].copy_from_slice(input);
+    
+    // Параметры интерполяции
+    let params = SincInterpolationParameters {
+        sinc_len: 256,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 256,
+        window: WindowFunction::BlackmanHarris2,
+    };
+    
+    // Создаем ресэмплер с увеличенным размером блока
+    let mut resampler = SincFixedIn::<f32>::new(
+        ratio as f64,
+        1.0,
+        params,
+        block_size,
+        1 // моно
+    ).map_err(|e| TtsError::TimeStretchingError(format!("Ошибка инициализации Rubato для паддинга: {}", e)))?;
+    
+    // Обрабатываем весь падированный массив за раз
+    let input_frames = vec![padded_input];
+    let output_frames = resampler.process(&input_frames, None)
+        .map_err(|e| TtsError::TimeStretchingError(format!("Ошибка при обработке падированного аудио: {}", e)))?;
+    
+    // Вычисляем, сколько семплов нам нужно взять из результата
+    let useful_samples = (input.len() as f32 * ratio) as usize;
+    let result = output_frames[0].iter()
+        .take(useful_samples)
+        .copied()
+        .collect();
+    
+    Ok(result)
 }
 
 /// Применяет fade in/out к аудиофрагменту для устранения щелчков и сглаживания переходов.
@@ -394,7 +470,6 @@ pub fn apply_fade(samples: &mut [f32], fade_ms: u32, sample_rate: u32) {
 /// // Использование только одной дорожки
 /// let mixed = mix_audio_tracks(&vocals, &background, 1.0, 0.0)?; // только голос
 /// ```
-#[allow(dead_code)]
 pub fn mix_audio_tracks(track1: &[f32], track2: &[f32], volume1: f32, volume2: f32) -> Result<Vec<f32>> {
     if track1.is_empty() {
         return Ok(track2.to_vec());
@@ -618,6 +693,49 @@ pub fn crossfade_fragments(
     result.extend_from_slice(&second[crossfade_samples..]);
     
     result
+}
+
+/// Конвертирует моно-аудио в стерео дублированием канала
+/// 
+/// # Аргументы
+/// 
+/// * `mono_samples` - Входные моно PCM-семплы (f32)
+/// 
+/// # Возвращает
+/// 
+/// Вектор стерео-семплов, где каждый моно-семпл продублирован в левый и правый каналы
+/// 
+/// # Примеры
+/// 
+/// ```rust
+/// let mono = vec![0.5, -0.5, 0.3];
+/// let stereo = convert_mono_to_stereo(&mono);
+/// assert_eq!(stereo, vec![0.5, 0.5, -0.5, -0.5, 0.3, 0.3]);
+/// ```
+pub fn convert_mono_to_stereo(mono_samples: &[f32]) -> Vec<f32> {
+    let mut stereo_samples = Vec::with_capacity(mono_samples.len() * 2);
+    
+    for &sample in mono_samples {
+        // Дублируем каждый семпл для левого и правого каналов
+        stereo_samples.push(sample);
+        stereo_samples.push(sample);
+    }
+    
+    stereo_samples
+}
+
+/// Проверяет, является ли аудио стерео или моно
+/// 
+/// # Аргументы
+/// 
+/// * `samples` - PCM-семплы (f32)
+/// * `channels` - Количество каналов
+/// 
+/// # Возвращает
+/// 
+/// `true` если аудио стерео (2 канала), иначе `false`
+pub fn is_stereo(channels: u32) -> bool {
+    channels == 2
 }
 
 #[cfg(test)]

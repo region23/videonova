@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 use tokio::sync::mpsc::Sender;
-use log::{info, warn};
+use log::{info, warn, error};
 
 use crate::utils::tts::types::{
     TtsError, Result, SubtitleCue, AudioFragment, 
@@ -59,79 +59,172 @@ impl TtsSynchronizer {
         // Шаг 4: Генерация аудиофрагментов для каждого субтитра
         let fragments = self.generate_fragments(&optimized_cues).await?;
         
-        // Шаг 5: Загрузка и анализ оригинального аудио (если указано)
-        let original_audio = if let Some(audio_path) = self.config.original_audio_path {
-            info!("Загрузка оригинального аудио: {}", audio_path);
-            match audio_format::decode_audio_file(audio_path) {
-                Ok(audio) => Some(audio),
-                Err(err) => {
-                    warn!("Не удалось загрузить оригинальное аудио: {}", err);
-                    None
+        // Шаг 5: Объединение аудиофрагментов
+        send_progress(&self.config.progress_sender, ProgressUpdate::MergingFragments).await;
+        let (combined_samples, sample_rate) = self.combine_fragments(fragments).await?;
+        
+        // Шаг 6: Микширование с инструменталом, если доступен оригинальный аудиофайл
+        let (mixed_samples, sample_rate, channels) = self.mix_with_instrumental(&combined_samples, sample_rate).await?;
+
+        // Шаг 7: Нормализация аудио
+        let original_audio_path = self.config.original_audio_path;
+        send_progress(
+            &self.config.progress_sender, 
+            ProgressUpdate::Normalizing { using_original: original_audio_path.is_some() }
+        ).await;
+        
+        let normalized = if let Some(path) = original_audio_path {
+            // Нормализуем относительно оригинального аудио
+            let (original_samples, _) = audio_format::decode_audio_file(path)?;
+            let original_rms = audio_format::compute_rms(&original_samples);
+            
+            if original_rms > 0.00001 {
+                // Используем чуть меньшую громкость, чем у оригинала
+                let target_rms = original_rms * 0.9;
+                let mut mixed_copy = mixed_samples.clone();
+                if audio_processing::normalize_rms(&mut mixed_copy, target_rms) {
+                    info!("Нормализация аудио с использованием оригинала как референса");
+                    mixed_copy
+                } else {
+                    audio_processing::normalize_peak(&mixed_samples, self.config.audio_config.target_peak_level)?
                 }
+            } else {
+                // Если оригинал слишком тихий, используем стандартную нормализацию
+                audio_processing::normalize_peak(&mixed_samples, self.config.audio_config.target_peak_level)?
             }
         } else {
-            None
+            audio_processing::normalize_peak(&mixed_samples, self.config.audio_config.target_peak_level)?
         };
         
-        // Шаг 6: Объединение аудиофрагментов
-        send_progress(&self.config.progress_sender, ProgressUpdate::MergingFragments).await;
-        let (mut combined_samples, sample_rate) = self.combine_fragments(fragments).await?;
-        
-        // Шаг 7: Нормализация аудио
-        self.normalize_audio(&mut combined_samples, original_audio.as_ref()).await?;
-        
-        // Шаг 8: Сохранение результата
+        // Шаг 8: Запись аудио в WAV-файл
         send_progress(&self.config.progress_sender, ProgressUpdate::Encoding).await;
-        audio_format::encode_wav(&combined_samples, sample_rate, self.config.output_wav.to_str().unwrap())?;
         
-        // Шаг 9: Завершение
+        // Записываем аудио с учетом количества каналов (моно или стерео)
+        let output_path_str = self.config.output_wav.to_str()
+            .ok_or_else(|| TtsError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput, 
+                "Некорректный путь к выходному файлу"
+            )))?;
+        
+        info!("Сохранение результата в формате с {} каналами", channels);
+        audio_format::encode_wav_multi_channel(
+            &normalized, 
+            sample_rate, 
+            channels as u16,  // преобразуем u32 в u16 для совместимости с WavSpec
+            output_path_str
+        )?;
+        
+        // Отправляем оповещение о завершении
         send_progress(&self.config.progress_sender, ProgressUpdate::Finished).await;
-        info!("Синхронизация TTS завершена успешно");
         
+        info!("TTS синхронизация завершена, файл сохранен: {:?}", self.config.output_wav);
         Ok(self.config.output_wav.clone())
     }
     
     /// Генерирует аудиофрагменты для каждого субтитра
     async fn generate_fragments(&mut self, cues: &[SubtitleCue]) -> Result<Vec<AudioFragment>> {
-        let mut fragments = Vec::with_capacity(cues.len());
         let total_cues = cues.len();
+        info!("Начинаем генерацию TTS для {} субтитров", total_cues);
         
-        for (index, cue) in cues.iter().enumerate() {
+        // Создаем батчи текстов для более эффективной обработки
+        let batch_size = 5; // Можно настроить размер батча
+        let mut fragments = Vec::with_capacity(total_cues);
+        
+        // Обрабатываем субтитры батчами
+        for chunk in cues.chunks(batch_size) {
+            // Индексы для текущего батча
+            let start_idx = fragments.len();
+            let end_idx = start_idx + chunk.len() - 1;
+            
             // Отправляем прогресс
             send_progress(
                 &self.config.progress_sender, 
-                ProgressUpdate::TTSGeneration { current: index + 1, total: total_cues }
+                ProgressUpdate::TTSGeneration { current: start_idx + 1, total: total_cues }
             ).await;
             
-            info!("Генерация TTS для субтитра {}/{}: '{}'", index + 1, total_cues, cue.text);
+            info!("Генерация TTS для батча субтитров {}-{}/{}", 
+                  start_idx + 1, end_idx + 1, total_cues);
             
-            // Находим начало следующего субтитра (если есть)
-            let next_cue_start = if index < cues.len() - 1 {
-                Some(cues[index + 1].start)
-            } else {
-                None
+            // Собираем тексты для батча
+            let texts: Vec<String> = chunk.iter()
+                .map(|cue| cue.text.clone())
+                .collect();
+            
+            // Генерируем TTS для всего батча
+            let batch_results = match self.generate_tts_batch_for_cues(&texts).await {
+                Ok(results) => results,
+                Err(e) => {
+                    // Если батчевая обработка не удалась, пытаемся обработать по одному
+                    error!("Ошибка при батчевой обработке TTS: {}. Пробуем обработку по одному.", e);
+                    
+                    let mut individual_results = Vec::with_capacity(chunk.len());
+                    
+                    for (i, cue) in chunk.iter().enumerate() {
+                        let current_idx = start_idx + i;
+                        
+                        // Отправляем прогресс
+                        send_progress(
+                            &self.config.progress_sender, 
+                            ProgressUpdate::TTSGeneration { current: current_idx + 1, total: total_cues }
+                        ).await;
+                        
+                        info!("Генерация TTS для отдельного субтитра {}/{}: '{}'", 
+                             current_idx + 1, total_cues, cue.text);
+                        
+                        let (audio_data, processed_text) = self.generate_tts_for_cue(cue).await?;
+                        individual_results.push((audio_data, processed_text));
+                    }
+                    
+                    individual_results
+                }
             };
             
-            // Генерируем речь
-            let (audio_data, processed_text) = self.generate_tts_for_cue(cue).await?;
-            
-            // Декодируем MP3 в PCM
-            let (samples, sample_rate) = audio_format::decode_mp3(&audio_data)?;
-            
-            // Создаем аудиофрагмент
-            let fragment = AudioFragment {
-                samples,
-                sample_rate,
-                text: processed_text,
-                start_time: cue.start,
-                end_time: cue.end,
-                next_cue_start,
-            };
-            
-            fragments.push(fragment);
+            // Преобразуем полученные аудио данные в AudioFragment
+            for (i, (audio_data, processed_text)) in batch_results.into_iter().enumerate() {
+                let cue_idx = start_idx + i;
+                let cue = &chunk[i];
+                
+                // Находим начало следующего субтитра (если есть)
+                let next_cue_start = if cue_idx < total_cues - 1 {
+                    Some(cues[cue_idx + 1].start)
+                } else {
+                    None
+                };
+                
+                // Декодируем MP3 в PCM
+                let (samples, sample_rate) = audio_format::decode_mp3(&audio_data)?;
+                
+                // Создаем аудиофрагмент
+                let fragment = AudioFragment {
+                    samples,
+                    sample_rate,
+                    text: processed_text,
+                    start_time: cue.start,
+                    end_time: cue.end,
+                    next_cue_start,
+                };
+                
+                fragments.push(fragment);
+            }
         }
         
+        info!("Завершена генерация TTS для всех {} субтитров", total_cues);
         Ok(fragments)
+    }
+    
+    /// Генерирует речь для батча субтитров
+    async fn generate_tts_batch_for_cues(&mut self, texts: &[String]) -> Result<Vec<(Vec<u8>, String)>> {
+        // Проверяем батч тестов на пустоту
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Используем новую функцию батчевой обработки
+        openai_tts::generate_tts_batch(
+            self.config.api_key,
+            texts,
+            &self.config.tts_config
+        ).await
     }
     
     /// Генерирует речь для одного субтитра
@@ -264,42 +357,183 @@ impl TtsSynchronizer {
         Ok((combined, sample_rate))
     }
     
-    /// Нормализует аудио, возможно используя оригинальное аудио как референс
-    async fn normalize_audio(&self, samples: &mut Vec<f32>, original_audio: Option<&(Vec<f32>, u32)>) -> Result<()> {
-        if samples.is_empty() {
-            return Err(TtsError::AudioProcessingError("Пустой аудиопоток для нормализации".to_string()));
-        }
-        
-        if let Some((ref_samples, _)) = original_audio {
-            // Используем оригинальное аудио как референс
+    /// Микширует голос TTS с инструментальной дорожкой, если она доступна
+    /// Возвращает стерео-микс для лучшего качества звука
+    async fn mix_with_instrumental(&self, tts_audio: &[f32], sample_rate: u32) -> Result<(Vec<f32>, u32, u32)> {
+        // Проверяем, доступен ли оригинальный аудиофайл для извлечения инструментала
+        if let Some(original_audio_path) = self.config.original_audio_path {
+            info!("Пробуем получить инструментал из оригинального аудио: {}", original_audio_path);
+            
+            // Создаем временную директорию для выходных файлов Demucs
+            let temp_dir = std::env::temp_dir().join("videonova_demucs");
+            if !temp_dir.exists() {
+                std::fs::create_dir_all(&temp_dir).map_err(|e| 
+                    TtsError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Other, 
+                        format!("Не удалось создать временную директорию: {}", e)
+                    ))
+                )?;
+            }
+            
+            // Проверяем, существует ли файл оригинального аудио и имеет ли он размер > 0
+            let original_audio_pathbuf = std::path::PathBuf::from(original_audio_path);
+            if !original_audio_pathbuf.exists() {
+                warn!("Оригинальный аудиофайл не существует: {}. Продолжаем без инструментала.", original_audio_path);
+                let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+                return Ok((stereo_tts, sample_rate, 2));
+            }
+            
+            // Проверяем размер файла
+            let file_metadata = match std::fs::metadata(&original_audio_pathbuf) {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    warn!("Не удалось получить метаданные файла: {}. Ошибка: {}. Продолжаем без инструментала.", 
+                          original_audio_path, e);
+                    let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+                    return Ok((stereo_tts, sample_rate, 2));
+                }
+            };
+            
+            if file_metadata.len() == 0 {
+                warn!("Оригинальный аудиофайл пуст: {}. Продолжаем без инструментала.", original_audio_path);
+                let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+                return Ok((stereo_tts, sample_rate, 2));
+            }
+            
+            // Используем Demucs для разделения аудио на вокал и инструментал
             send_progress(
                 &self.config.progress_sender, 
-                ProgressUpdate::Normalizing { using_original: true }
+                ProgressUpdate::Custom("Разделение аудио на инструментал и вокал".to_string())
             ).await;
             
-            info!("Нормализация аудио с использованием оригинала как референса");
+            // Этот код может вызвать ошибку, если Demucs не установлен на системе,
+            // поэтому заключим его в блок match и продолжим без инструментала, если возникнет ошибка
+            let instrumental_path = match crate::utils::tts::demucs::separate_audio(
+                original_audio_pathbuf, 
+                temp_dir, 
+                Some("htdemucs")
+            ).await {
+                Ok((instrumental_path, _)) => {
+                    info!("Успешно извлечен инструментал: {}", instrumental_path.display());
+                    instrumental_path
+                },
+                Err(e) => {
+                    warn!("Не удалось извлечь инструментал: {}. Продолжаем без инструментала.", e);
+                    // Возвращаем оригинальное TTS аудио в стерео формате
+                    let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+                    return Ok((stereo_tts, sample_rate, 2));
+                }
+            };
             
-            // Вычисляем RMS оригинала
-            let ref_rms = audio_format::compute_rms(ref_samples);
-            if ref_rms > 0.0 {
-                // Нормализуем с целевым RMS, отражающим оригинал
-                let target_rms = ref_rms * 0.9; // Немного тише оригинала
-                audio_processing::normalize_rms(samples, target_rms);
-                return Ok(());
+            // Проверяем, существует ли файл инструментала и имеет ли он размер > 0
+            if !instrumental_path.exists() {
+                warn!("Файл инструментала не существует: {}. Продолжаем без инструментала.", 
+                      instrumental_path.display());
+                let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+                return Ok((stereo_tts, sample_rate, 2));
             }
+            
+            // Проверяем размер файла инструментала
+            let inst_metadata = match std::fs::metadata(&instrumental_path) {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    warn!("Не удалось получить метаданные файла инструментала: {}. Ошибка: {}. Продолжаем без инструментала.", 
+                          instrumental_path.display(), e);
+                    let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+                    return Ok((stereo_tts, sample_rate, 2));
+                }
+            };
+            
+            if inst_metadata.len() == 0 {
+                warn!("Файл инструментала пуст: {}. Продолжаем без инструментала.", 
+                      instrumental_path.display());
+                let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+                return Ok((stereo_tts, sample_rate, 2));
+            }
+            
+            // Выводим расширение файла инструментала для отладки
+            let extension = instrumental_path.extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("<нет расширения>");
+            info!("Формат файла инструментала: {}, размер: {} байт", 
+                 extension, inst_metadata.len());
+            
+            // Декодируем инструментал
+            let (instrumental_samples, instrumental_sample_rate, instrumental_channels) = 
+                match audio_format::decode_audio_file_with_channels(&instrumental_path) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        warn!("Не удалось декодировать инструментал: {}. Продолжаем без инструментала.", e);
+                        // Возвращаем оригинальное TTS аудио в стерео формате
+                        let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+                        return Ok((stereo_tts, sample_rate, 2));
+                    }
+                };
+            
+            // Проверяем, не пуст ли результат декодирования
+            if instrumental_samples.is_empty() {
+                warn!("Декодированные данные инструментала пусты. Продолжаем без инструментала.");
+                let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+                return Ok((stereo_tts, sample_rate, 2));
+            }
+            
+            // Ресемплируем инструментал, если необходимо
+            let instrumental_samples = if instrumental_sample_rate != sample_rate {
+                info!("Ресемплирование инструментала с {} Гц на {} Гц", instrumental_sample_rate, sample_rate);
+                // Здесь должен быть код ресемплирования, но пока просто предупреждаем и возвращаем без микширования
+                warn!("Разные частоты дискретизации, ресемплирование пока не реализовано");
+                // Возвращаем оригинальное TTS аудио в стерео формате
+                let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+                return Ok((stereo_tts, sample_rate, 2));
+            } else {
+                instrumental_samples
+            };
+            
+            // Теперь микшируем голос и инструментал
+            send_progress(
+                &self.config.progress_sender, 
+                ProgressUpdate::Custom("Микширование голоса с инструменталом".to_string())
+            ).await;
+            
+            info!("Микширование TTS с инструменталом");
+            
+            // Сначала преобразуем моно TTS в стерео, если инструментал стерео
+            let tts_stereo = if audio_processing::is_stereo(instrumental_channels) {
+                info!("Преобразование моно TTS в стерео для микширования");
+                audio_processing::convert_mono_to_stereo(tts_audio)
+            } else {
+                tts_audio.to_vec()
+            };
+            
+            // Определяем количество каналов в выходном файле - стерео, если инструментал стерео
+            let output_channels = if audio_processing::is_stereo(instrumental_channels) { 2 } else { 1 };
+            
+            // Загружаем параметры из конфигурации
+            let voice_level = self.config.audio_config.voice_to_instrumental_ratio;
+            let instrumental_level = self.config.audio_config.instrumental_boost;
+            
+            // Вызываем функцию микширования
+            let mixed = audio_processing::mix_audio_tracks(
+                &tts_stereo, 
+                &instrumental_samples, 
+                voice_level, 
+                instrumental_level
+            )?;
+            
+            // Проверяем результат
+            if mixed.is_empty() {
+                warn!("Микширование дало пустой результат. Возвращаем только TTS аудио в стерео.");
+                let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+                return Ok((stereo_tts, sample_rate, 2));
+            }
+            
+            info!("Микширование успешно: {} семплов, {} каналов", mixed.len(), output_channels);
+            return Ok((mixed, sample_rate, output_channels));
         }
         
-        // Если нет оригинала или он имеет нулевой RMS, используем обычную пиковую нормализацию
-        send_progress(
-            &self.config.progress_sender, 
-            ProgressUpdate::Normalizing { using_original: false }
-        ).await;
-        
-        info!("Стандартная пиковая нормализация аудио");
-        let normalized = audio_processing::normalize_peak(samples, self.config.audio_config.target_peak_level)?;
-        *samples = normalized;
-        
-        Ok(())
+        // Если нет оригинального аудио, возвращаем только TTS, но в стерео формате
+        let stereo_tts = audio_processing::convert_mono_to_stereo(tts_audio);
+        Ok((stereo_tts, sample_rate, 2))
     }
 }
 

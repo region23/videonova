@@ -398,6 +398,8 @@ async fn enhanced_tts_with_logging(
                                 ProgressUpdate::Normalizing { using_original: _ } => (95.0, "Нормализация громкости".to_string(), None, None),
                                 ProgressUpdate::Encoding => (98.0, "Сохранение результата".to_string(), None, None),
                                 ProgressUpdate::Finished => (100.0, "TTS готов".to_string(), None, None),
+                                ProgressUpdate::Custom(message) => (96.0, message.clone(), None, None),
+                                ProgressUpdate::Error(error_message) => (99.0, format!("Ошибка: {}", error_message), None, None),
                             };
                             
                             // Убедимся, что прогресс в диапазоне 0-100

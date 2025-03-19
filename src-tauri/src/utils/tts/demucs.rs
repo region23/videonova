@@ -95,11 +95,10 @@ pub async fn ensure_demucs_installed() -> Result<()> {
 /// # Возвращает
 /// 
 /// Кортеж путей к файлам с инструменталом и вокалом
-#[allow(dead_code)]
 pub async fn separate_audio<P: AsRef<Path>>(
     input_path: P, 
     output_dir: P,
-    model: Option<&str>
+    model_name: Option<&str>,
 ) -> Result<(PathBuf, PathBuf)> {
     // Убеждаемся, что Demucs установлен
     ensure_demucs_installed().await?;
@@ -121,10 +120,14 @@ pub async fn separate_audio<P: AsRef<Path>>(
             .map_err(|e| TtsError::IoError(e))?;
     }
     
-    let model_name = model.unwrap_or("htdemucs");
+    let model_name = model_name.unwrap_or("htdemucs");
     
     info!("Запуск Demucs для разделения аудио: {}", input_path.display());
     info!("Используемая модель: {}", model_name);
+    
+    // Преобразуем путь в строку для передачи в команду
+    let input_path_str = input_path.to_str()
+        .ok_or_else(|| TtsError::Other(anyhow::anyhow!("Не удалось преобразовать путь в строку")))?;
     
     let output_status = TokioCommand::new("python3")
         .arg("-m")
@@ -132,7 +135,7 @@ pub async fn separate_audio<P: AsRef<Path>>(
         .arg("--two-stems=vocals")
         .arg(format!("--out={}", output_dir.display()))
         .arg(format!("--model={}", model_name))
-        .arg(input_path)
+        .arg(input_path_str)
         .status()
         .await
         .map_err(|e| TtsError::Other(anyhow::anyhow!("Ошибка запуска Demucs: {}", e)))?;
